@@ -103,33 +103,14 @@ class RedisMemoryManager:
     def get_conversation_context(self, session_id: str, max_messages: int = 3) -> str:
         """Recupera contexto da conversação para follow-up"""
         try:
-            # Busca todas as chaves da sessão usando SCAN para melhor performance
-            pattern = f"{self.key_prefix}:{session_id}:*"
-            keys = []
-
-            for key in self.redis_client.scan_iter(match=pattern, count=100):
-                keys.append(key)
-
-            if not keys:
+            messages = self.get_conversation_messages(session_id, max_messages=max_messages)
+            if not messages:
                 return ""
 
-            # Ordena por timestamp (message_id)
-            keys.sort(key=lambda x: int(x.split(':')[-1]))
-
-            # Pega as últimas mensagens
-            recent_keys = keys[-max_messages:] if len(keys) > max_messages else keys
-
-            # Usa pipeline para recuperar múltiplas chaves de uma vez
-            pipe = self.redis_client.pipeline()
-            for key in recent_keys:
-                pipe.hgetall(key)
-            results = pipe.execute()
-
             context_parts = []
-            for result in results:
-                if result:
-                    context_parts.append(f"Usuário: {result['user_message']}")
-                    context_parts.append(f"Assistente: {result['assistant_response']}")
+            for message in messages:
+                context_parts.append(f"Usuário: {message['user_message']}")
+                context_parts.append(f"Assistente: {message['assistant_response']}")
 
             context = "\n".join(context_parts)
             self.logger.info(f"📖 Contexto recuperado para sessão: {session_id}")
@@ -144,6 +125,51 @@ class RedisMemoryManager:
         except Exception as e:
             self.logger.error(f"❌ Erro inesperado ao recuperar contexto: {e}")
             return ""
+
+    def get_conversation_messages(self, session_id: str, max_messages: int = 3) -> List[Dict[str, str]]:
+        """Recupera mensagens estruturadas da sessão para tarefas de contextualização."""
+        try:
+            pattern = f"{self.key_prefix}:{session_id}:*"
+            keys = []
+
+            for key in self.redis_client.scan_iter(match=pattern, count=100):
+                keys.append(key)
+
+            if not keys:
+                return []
+
+            keys.sort(key=lambda x: int(x.split(':')[-1]))
+            recent_keys = keys[-max_messages:] if len(keys) > max_messages else keys
+
+            pipe = self.redis_client.pipeline()
+            for key in recent_keys:
+                pipe.hgetall(key)
+            results = pipe.execute()
+
+            messages: List[Dict[str, str]] = []
+            for index, result in enumerate(results, start=1):
+                if not result:
+                    continue
+                messages.append({
+                    'turn_index': index,
+                    'user_message': result.get('user_message', ''),
+                    'assistant_response': result.get('assistant_response', ''),
+                    'timestamp': result.get('timestamp', ''),
+                    'message_id': result.get('message_id', ''),
+                })
+
+            self.logger.info(f"📚 Mensagens estruturadas recuperadas para sessão: {session_id}")
+            return messages
+
+        except (ConnectionError, TimeoutError) as e:
+            self.logger.error(f"❌ Erro de conexão ao recuperar mensagens estruturadas: {e}")
+            return []
+        except ResponseError as e:
+            self.logger.error(f"❌ Erro de resposta Redis ao recuperar mensagens estruturadas: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"❌ Erro inesperado ao recuperar mensagens estruturadas: {e}")
+            return []
 
     def clear_session(self, session_id: str) -> None:
         """Limpa histórico de uma sessão específica"""
