@@ -5,6 +5,7 @@ Inicializacao centralizada do Firebase Admin para o backend do C.O.R.A.
 """
 
 import os
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -20,13 +21,24 @@ def get_firebase_app():
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
+    service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
     service_account_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH')
-    if not service_account_path:
-        raise RuntimeError('FIREBASE_SERVICE_ACCOUNT_PATH nao configurado')
 
-    service_account_file = Path(service_account_path)
-    if not service_account_file.exists():
-        raise RuntimeError(f'Arquivo de service account nao encontrado: {service_account_path}')
+    if service_account_json:
+        try:
+            service_account_data = json.loads(service_account_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError('FIREBASE_SERVICE_ACCOUNT_JSON invalido') from exc
+        credential = credentials.Certificate(service_account_data)
+    else:
+        if not service_account_path:
+            raise RuntimeError('FIREBASE_SERVICE_ACCOUNT_PATH ou FIREBASE_SERVICE_ACCOUNT_JSON nao configurado')
+
+        service_account_file = Path(service_account_path)
+        if not service_account_file.exists():
+            raise RuntimeError(f'Arquivo de service account nao encontrado: {service_account_path}')
+
+        credential = credentials.Certificate(str(service_account_file))
 
     project_id = os.getenv('FIREBASE_PROJECT_ID')
     storage_bucket = os.getenv('FIREBASE_STORAGE_BUCKET')
@@ -37,7 +49,6 @@ def get_firebase_app():
     if storage_bucket:
         options['storageBucket'] = storage_bucket
 
-    credential = credentials.Certificate(str(service_account_file))
     return firebase_admin.initialize_app(credential, options or None)
 
 
