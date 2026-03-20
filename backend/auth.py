@@ -31,7 +31,16 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
     token = credentials.credentials
 
     try:
-        payload = firebase_auth.verify_id_token(token, app=get_firebase_app())
+        firebase_app = get_firebase_app()
+    except Exception as exc:
+        logger.error('❌ Falha ao inicializar Firebase Admin para validacao do token: %s', exc)
+        raise HTTPException(
+            status_code=500,
+            detail='Autenticacao Firebase do servidor indisponivel. Contate o administrador.',
+        ) from exc
+
+    try:
+        payload = firebase_auth.verify_id_token(token, app=firebase_app)
     except Exception as exc:
         logger.error('❌ Falha ao validar token Firebase: %s', exc)
         raise HTTPException(
