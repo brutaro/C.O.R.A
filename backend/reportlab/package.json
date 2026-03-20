@@ -1,0 +1,15 @@
+{
+  "name": "pdf-generator-lara",
+  "version": "1.0.0",
+  "description": "Gerador de PDF com suporte a emojis usando Puppeteer",
+  "main": "gerar_pdf.py",
+  "scripts": {
+    "test": "python gerar_pdf.py"
+  },
+  "keywords": ["pdf", "puppeteer", "emoji", "lara"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^24.30.0"
+  }
+}

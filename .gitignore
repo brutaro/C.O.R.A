@@ -1,0 +1,23 @@
+.DS_Store
+
+# Firebase
+firebase-debug.log
+.firebase/
+cora-*-firebase-adminsdk-*.json
+
+# Backend
+backend/.env
+backend/.venv/
+backend/__pycache__/
+backend/*.log
+
+# Frontend
+frontend/.env
+frontend/node_modules/
+frontend/build/
+frontend/frontend.log
+
+# Relatorios e backups locais
+reports/
+backend/prompts/*.zip
+backend/prompts/*_v2.txt

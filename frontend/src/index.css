@@ -1,0 +1,147 @@
+/* Reset e configurações globais */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* Variáveis de Tema */
+body[data-theme="dark"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2d2d2d;
+  --bg-tertiary: #404040;
+  --text-primary: #ffffff;
+  --text-secondary: #a0a0a0;
+  --border-color: #404040;
+  --shadow: rgba(0, 0, 0, 0.3);
+  --accent-primary: #0f766e;
+  --accent-secondary: #0b5f5a;
+  --accent-tertiary: #094b47;
+  --accent-shadow: rgba(15, 118, 110, 0.3);
+  --accent-shadow-strong: rgba(15, 118, 110, 0.5);
+  --accent-soft: rgba(15, 118, 110, 0.12);
+  --accent-warm: #d97706;
+}
+
+body[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-tertiary: #e0e0e0;
+  --text-primary: #1a1a1a;
+  --text-secondary: #666666;
+  --border-color: #d0d0d0;
+  --shadow: rgba(0, 0, 0, 0.1);
+  --accent-primary: #0f766e;
+  --accent-secondary: #0b5f5a;
+  --accent-tertiary: #094b47;
+  --accent-shadow: rgba(15, 118, 110, 0.2);
+  --accent-shadow-strong: rgba(15, 118, 110, 0.35);
+  --accent-soft: rgba(15, 118, 110, 0.12);
+  --accent-warm: #d97706;
+}
+
+/* Default (Dark) */
+body {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2d2d2d;
+  --bg-tertiary: #404040;
+  --text-primary: #ffffff;
+  --text-secondary: #a0a0a0;
+  --border-color: #404040;
+  --shadow: rgba(0, 0, 0, 0.3);
+  --accent-primary: #0f766e;
+  --accent-secondary: #0b5f5a;
+  --accent-tertiary: #094b47;
+  --accent-shadow: rgba(15, 118, 110, 0.3);
+  --accent-shadow-strong: rgba(15, 118, 110, 0.5);
+  --accent-soft: rgba(15, 118, 110, 0.12);
+  --accent-warm: #d97706;
+
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  overflow-x: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Scrollbar personalizada */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Seleção de texto */
+::selection {
+  background-color: var(--accent-primary);
+  color: white;
+}
+
+/* Links */
+a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Botões */
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: inherit;
+}
+
+/* Inputs */
+input, textarea {
+  font-family: inherit;
+  outline: none;
+}
+
+/* Utilitários */
+.text-center {
+  text-align: center;
+}
+
+.hidden {
+  display: none;
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.h-full {
+  height: 100%;
+}

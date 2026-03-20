@@ -1,0 +1,135 @@
+.app {
+  display: flex;
+  height: 100vh;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  transition: margin-left 0.3s ease;
+}
+
+.main-content.sidebar-open {
+  margin-left: 260px;
+}
+
+.main-content.sidebar-closed {
+  margin-left: 0;
+}
+
+.chat-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  /* Melhorias para scroll touch no mobile */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  /* Garante altura mínima para scroll funcionar */
+  min-height: 0;
+}
+
+/* Responsividade */
+@media (max-width: 768px) {
+  .app {
+    /* Previne scroll horizontal no mobile */
+    overflow-x: hidden;
+    width: 100%;
+    position: relative;
+  }
+
+  .main-content {
+    margin-left: 0;
+    width: 100%;
+    /* Garante que o conteúdo principal ocupe toda a largura */
+    max-width: 100vw;
+  }
+
+  .main-content.sidebar-closed {
+    margin-left: 0;
+  }
+
+  .chat-container {
+    padding: 12px;
+    /* Melhor uso do espaço vertical no mobile */
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    /* Scroll touch otimizado */
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+
+  /* Previne que o body faça scroll quando o sidebar está aberto */
+  body.sidebar-open-mobile {
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+  }
+}
+
+/* Animações */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Loading animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.loading {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* Loading state para autenticação */
+.app-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.app-loading .loading-spinner {
+  width: 50px;
+  height: 50px;
+  border: 4px solid rgba(156, 163, 175, 0.3);
+  border-top-color: var(--text-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 1rem;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.app-loading p {
+  font-size: 1.1rem;
+  opacity: 0.7;
+}
+

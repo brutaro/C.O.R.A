@@ -1,0 +1,42 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == request.auth.uid;
+
+      allow read, update, delete: if isOwner(userId);
+
+      match /conversations/{conversationId} {
+        allow create: if isOwner(userId)
+          && request.resource.data.conversation_id == conversationId
+          && request.resource.data.assistant_slug == "cora"
+          && request.resource.data.assistant_name == "C.O.R.A."
+          && request.resource.data.knowledge_namespace == "notas_conflito_interesse";
+
+        allow read, update, delete: if isOwner(userId);
+
+        match /messages/{messageId} {
+          allow create: if isOwner(userId)
+            && request.resource.data.message_id == messageId
+            && (
+              request.resource.data.role == "user"
+              || request.resource.data.role == "assistant"
+            )
+            && request.resource.data.content is string;
+
+          allow read, update, delete: if isOwner(userId);
+        }
+      }
+    }
+  }
+}

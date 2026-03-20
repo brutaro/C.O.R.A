@@ -1,0 +1,24 @@
+# Ambientes Virtuais
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node.js
+node_modules/
+frontend/node_modules/
+frontend/build/
+
+# Variáveis de Ambiente e Segredos (CRÍTICO)
+.env
+.env.local
+.env.*.local
+client_secret_*.json
+credentials.json
+
+# Logs e Temporários
+*.log
+.DS_Store

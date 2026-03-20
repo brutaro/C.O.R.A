@@ -1,0 +1,39 @@
+# C.O.R.A. - Dependencias Web
+# Sistema de Pesquisa Juridica Inteligente para conflito de interesses
+# Versões fixas para Railway
+
+# FastAPI e servidor web
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+
+# Templates e arquivos estáticos
+jinja2==3.1.2
+
+# Validação de dados
+pydantic==2.11.7
+pydantic-core==2.33.2
+pydantic-settings==2.10.1
+
+# Autenticação JWT
+PyJWT==2.10.1
+cryptography==46.0.1
+
+# Formatação de texto
+strip-markdown==1.3
+
+# Exportação de conversas em PDF
+# NOTA: A geração de PDF usa Puppeteer (Node.js) ao invés de bibliotecas Python
+# Para instalar as dependencias Node.js, execute: cd ../frontend && npm install
+# O Puppeteer é necessário para renderização de alta qualidade com suporte a emojis
+
+# Dependências sincronizadas com o backend principal
+requests==2.32.5
+redis==5.0.1
+bleach==6.1.0
+
+# Dependências do sistema principal
+firebase-admin
+google-cloud-firestore
+google-generativeai==0.8.3
+pinecone-client==5.0.1
+python-dotenv==1.0.1
