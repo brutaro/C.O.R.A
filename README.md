@@ -41,3 +41,4 @@ Observacao operacional:
 
 - o Firestore foi criado em modo de teste no console;
 - a base de regras definitiva ja foi preparada localmente, mas ainda precisa ser publicada no projeto Firebase.
+- em Cloud Run, o backend pode usar a service account anexada ao servico via credenciais padrao do Google; `FIREBASE_SERVICE_ACCOUNT_JSON` e `FIREBASE_SERVICE_ACCOUNT_PATH` ficam opcionais para esse ambiente.
