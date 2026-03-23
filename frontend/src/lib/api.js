@@ -78,6 +78,11 @@ export async function getApiErrorMessage(response) {
     if (contentType.includes('application/json')) {
       const data = await response.json();
       if (data?.detail) {
+        if (typeof data.detail === 'object') {
+          const detailMessage = data.detail.message || defaultMessage;
+          const detailError = data.detail.error ? `: ${data.detail.error}` : '';
+          return `${detailMessage}${detailError}`;
+        }
         return data.detail;
       }
     } else {

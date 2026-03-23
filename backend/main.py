@@ -49,6 +49,9 @@ ASSISTANT_DESCRIPTION = "Conflito de Interesses: Orientacao, Registro e Analise"
 KNOWLEDGE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "notas_conflito_interesse")
 PUBLIC_LOCAL_HOST = os.getenv("PUBLIC_LOCAL_HOST", "localhost")
 
+research_agent = None
+research_agent_error: Optional[str] = None
+
 # Inicializa FastAPI
 app = FastAPI(
     title=f"{ASSISTANT_NAME} - {ASSISTANT_DESCRIPTION}",
@@ -89,13 +92,50 @@ async def redirect_loopback_host(request: Request, call_next):
 
     return await call_next(request)
 
-# Inicializa agente
-try:
-    research_agent = SimpleResearchAgent()
-    logger.info("✅ Agente de pesquisa inicializado")
-except Exception as e:
-    logger.error(f"❌ Erro ao inicializar agente: {e}")
-    research_agent = None
+def _get_agent_dependency_status() -> Dict[str, Any]:
+    gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return {
+        "gemini_api_key_configured": bool(gemini_api_key),
+        "pinecone_api_key_configured": bool(os.getenv("PINECONE_API_KEY")),
+        "redis_host_configured": bool(os.getenv("REDIS_HOST")),
+        "redis_password_configured": bool(os.getenv("REDIS_PASSWORD")),
+        "knowledge_namespace": KNOWLEDGE_NAMESPACE,
+    }
+
+
+def _initialize_research_agent() -> Optional[SimpleResearchAgent]:
+    global research_agent, research_agent_error
+
+    try:
+        research_agent = SimpleResearchAgent()
+        research_agent_error = None
+        logger.info("✅ Agente de pesquisa inicializado")
+    except Exception as e:
+        research_agent = None
+        research_agent_error = str(e)
+        logger.error("❌ Erro ao inicializar agente: %s", e)
+
+    return research_agent
+
+
+def _require_research_agent() -> SimpleResearchAgent:
+    agent = research_agent or _initialize_research_agent()
+    if agent:
+        return agent
+
+    dependency_status = _get_agent_dependency_status()
+    detail = research_agent_error or "Falha desconhecida na inicializacao do agente"
+    raise HTTPException(
+        status_code=500,
+        detail={
+            "message": "Agente nao disponivel",
+            "error": detail,
+            "dependency_status": dependency_status,
+        },
+    )
+
+
+_initialize_research_agent()
 
 # Frontend React está em web/frontend (gerenciado separadamente)
 
@@ -718,8 +758,7 @@ async def processar_consulta(
     user: dict = Depends(verify_token)
 ):
     """Processa consulta jurídica (requer autenticação)"""
-    if not research_agent:
-        raise HTTPException(status_code=500, detail="Agente não disponível")
+    agent = _require_research_agent()
 
     start_time = time.time()
     workflow_id = f"wf_{int(time.time())}"
@@ -729,7 +768,7 @@ async def processar_consulta(
         logger.info(f"📋 DEBUG - session_id: {consulta.session_id}, conversation_id: {consulta.conversation_id}")
 
         memory_session_id = consulta.conversation_id or consulta.session_id or user.get("uid")
-        result = await research_agent.process_query(consulta.pergunta, memory_session_id)
+        result = await agent.process_query(consulta.pergunta, memory_session_id)
 
         duracao = time.time() - start_time
 
@@ -855,11 +894,12 @@ async def clear_session(
     user: dict = Depends(verify_token)
 ):
     """Limpa histórico de uma sessão específica (requer autenticação)"""
-    if not research_agent or not research_agent.memory_manager:
+    agent = _require_research_agent()
+    if not agent.memory_manager:
         raise HTTPException(status_code=500, detail="Memória não disponível")
 
     try:
-        research_agent.memory_manager.clear_session(session_id)
+        agent.memory_manager.clear_session(session_id)
         return {"message": f"Sessão {session_id} limpa com sucesso"}
     except Exception as e:
         logger.error(f"❌ Erro ao limpar sessão: {e}")
@@ -871,11 +911,12 @@ async def get_session_stats(
     user: dict = Depends(verify_token)
 ):
     """Retorna estatísticas de uma sessão (requer autenticação)"""
-    if not research_agent or not research_agent.memory_manager:
+    agent = _require_research_agent()
+    if not agent.memory_manager:
         raise HTTPException(status_code=500, detail="Memória não disponível")
 
     try:
-        stats = research_agent.memory_manager.get_session_stats(session_id)
+        stats = agent.memory_manager.get_session_stats(session_id)
         return stats
     except Exception as e:
         logger.error(f"❌ Erro ao obter stats da sessão: {e}")
@@ -884,9 +925,12 @@ async def get_session_stats(
 @app.get("/api/health")
 async def health_check():
     """Verifica saúde do sistema"""
+    dependency_status = _get_agent_dependency_status()
     return {
         "status": "healthy" if research_agent else "unhealthy",
         "agent_available": research_agent is not None,
+        "agent_error": research_agent_error,
+        "dependency_status": dependency_status,
         "assistant": ASSISTANT_NAME,
         "knowledge_namespace": KNOWLEDGE_NAMESPACE,
         "auth_provider": "firebase",
