@@ -212,7 +212,7 @@ function App() {
           session_id: conversationId,
           conversation_id: conversationId,
         }),
-      });
+      }, user);
 
       if (!response.ok) {
         throw new Error(await getApiErrorMessage(response));

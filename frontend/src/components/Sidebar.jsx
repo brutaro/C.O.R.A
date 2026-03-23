@@ -234,7 +234,7 @@ function Sidebar({ isOpen, onToggle, onNewChat, user, onSignOut, currentConversa
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(exportPayload),
-      });
+      }, user);
 
       if (!response.ok) {
         throw new Error(await getApiErrorMessage(response));

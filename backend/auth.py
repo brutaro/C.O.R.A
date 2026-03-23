@@ -42,7 +42,7 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
     try:
         payload = firebase_auth.verify_id_token(token, app=firebase_app)
     except Exception as exc:
-        logger.error('❌ Falha ao validar token Firebase: %s', exc)
+        logger.error('❌ Falha ao validar token Firebase: %s (%s)', exc, exc.__class__.__name__)
         raise HTTPException(
             status_code=401,
             detail='Token de autenticacao invalido ou expirado. Faca login novamente.',

@@ -1,9 +1,54 @@
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from './firebase';
 
-export async function fetchWithAuth(input, init = {}) {
+async function waitForAuthenticatedUser(timeoutMs = 5000) {
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutId = null;
+    let unsubscribe = () => {};
+
+    const finalize = (user) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutId);
+      unsubscribe();
+      resolve(user || null);
+    };
+
+    unsubscribe = onAuthStateChanged(auth, (user) => {
+      finalize(user);
+    });
+
+    timeoutId = window.setTimeout(() => {
+      finalize(null);
+    }, timeoutMs);
+  });
+}
+
+async function resolveAuthUser(preferredUser) {
+  if (preferredUser) {
+    return preferredUser;
+  }
+
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  return waitForAuthenticatedUser();
+}
+
+export async function fetchWithAuth(input, init = {}, preferredUser = null) {
   const executeRequest = async (forceRefresh = true) => {
     const headers = new Headers(init.headers || {});
-    const token = await auth.currentUser?.getIdToken(forceRefresh);
+    const firebaseUser = await resolveAuthUser(preferredUser);
+    const token = await firebaseUser?.getIdToken(forceRefresh);
 
     if (token) {
       headers.set('Authorization', `Bearer ${token}`);
@@ -17,7 +62,7 @@ export async function fetchWithAuth(input, init = {}) {
 
   let response = await executeRequest(true);
 
-  if (response.status === 401 && auth.currentUser) {
+  if (response.status === 401) {
     response = await executeRequest(true);
   }
 
