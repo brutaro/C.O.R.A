@@ -30,6 +30,8 @@ steps:
       - --platform
       - managed
       - --allow-unauthenticated
+      - --update-env-vars
+      - FIREBASE_PROJECT_ID=cora-9d120,FIREBASE_STORAGE_BUCKET=cora-9d120.firebasestorage.app,FIREBASE_FIRESTORE_DATABASE_ID=(default)
       - --quiet
 
 images:
