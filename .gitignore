@@ -21,3 +21,6 @@ frontend/frontend.log
 reports/
 backend/prompts/*.zip
 backend/prompts/*_v2.txt
+
+# Desenvolvimento local
+.local-dev/

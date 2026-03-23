@@ -34,8 +34,24 @@ Arquivos Firebase locais:
 
 Execucao local:
 
-- backend: `cd CORA/backend && source .venv/bin/activate && uvicorn main:app --reload --port 8001`
-- frontend: `cd CORA/frontend && npm start`
+- diagnostico rapido: `./scripts/dev-doctor.sh`
+- subir tudo: `./scripts/dev-up.sh`
+- status: `./scripts/dev-status.sh`
+- parar tudo: `./scripts/dev-down.sh`
+
+Fluxo local esperado:
+
+- backend em `http://localhost:8001`
+- frontend em `http://localhost:3000`
+- health em `http://localhost:8001/api/health`
+
+Pre-requisitos locais:
+
+- `backend/.venv` criado com as dependencias Python
+- `frontend/node_modules` instalado
+- `backend/reportlab/node_modules` instalado para o PDF
+- `backend/.env` presente
+- `frontend/.env` presente
 
 Observacao operacional:
 
