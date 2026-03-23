@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Importa o agente simplificado
 import sys
@@ -108,11 +108,23 @@ class ConsultaRequest(BaseModel):
 class ConsultaResponse(BaseModel):
     resposta_completa: str
     fontes: int
-    references: list = []
+    references: List[Dict[str, Any]] = Field(default_factory=list)
     workflow_id: str
     duracao: float
     timestamp: str
     status: str = "success"
+
+
+class ConversationPdfMessagePayload(BaseModel):
+    role: str
+    content: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationPdfRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    title: Optional[str] = None
+    messages: List[ConversationPdfMessagePayload] = Field(default_factory=list)
 
 # Métricas globais
 metrics = {
@@ -176,8 +188,16 @@ async def _firestore_get_conversation(uid: str, conversation_id: str) -> Optiona
     try:
         return await asyncio.to_thread(_request)
     except Exception as exc:
-        logger.error("❌ Falha ao consultar Firestore (conversation): %s", exc)
-        raise HTTPException(status_code=500, detail="Erro ao consultar dados da conversa") from exc
+        logger.error(
+            "❌ Falha ao consultar Firestore (conversation=%s, uid=%s): %s",
+            conversation_id,
+            uid,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao consultar dados da conversa no Firestore do backend",
+        ) from exc
 
 
 async def _firestore_get_messages(uid: str, conversation_id: str) -> List[Dict[str, Any]]:
@@ -204,8 +224,16 @@ async def _firestore_get_messages(uid: str, conversation_id: str) -> List[Dict[s
     try:
         return await asyncio.to_thread(_request)
     except Exception as exc:
-        logger.error("❌ Falha ao consultar Firestore (messages): %s", exc)
-        raise HTTPException(status_code=500, detail="Erro ao consultar mensagens da conversa") from exc
+        logger.error(
+            "❌ Falha ao consultar Firestore (messages, conversation=%s, uid=%s): %s",
+            conversation_id,
+            uid,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao consultar mensagens da conversa no Firestore do backend",
+        ) from exc
 
 
 def _comeca_com_emoji(texto: str) -> bool:
@@ -473,8 +501,10 @@ def _build_conversation_html(
             html_content += '<table class="referencias-tabela">'
             for ref, relevancia, url in bloco["referencias"]:
                 ref_escaped = html.escape(ref)
-                if url:
-                    ref_html = f'<a href="{url}" class="referencia-link" target="_blank">{ref_escaped}</a>'
+                url_normalized = (url or "").strip()
+                if re.match(r"^https?://", url_normalized, flags=re.IGNORECASE):
+                    url_escaped = html.escape(url_normalized, quote=True)
+                    ref_html = f'<a href="{url_escaped}" class="referencia-link" target="_blank">{ref_escaped}</a>'
                 else:
                     ref_html = ref_escaped
                 html_content += f'<tr><td class="referencia-nome">{ref_html}</td><td class="referencia-relevancia">Relevância: {relevancia}</td></tr>'
@@ -581,7 +611,7 @@ def _render_pdf(html_content: str) -> bytes:
             const browser = await puppeteer.launch({{ 
                 headless: true,
                 {executable_path_js}
-                args: ['--no-sandbox', '--disable-setuid-sandbox']
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
             }});
             const page = await browser.newPage();
             await page.goto('file://{temp_html_path_escaped}', {{ waitUntil: 'networkidle0' }});
@@ -634,6 +664,51 @@ def _render_pdf(html_content: str) -> bytes:
             os.unlink(temp_js.name)
         except:
             pass
+
+
+def _normalize_pdf_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized_messages: List[Dict[str, Any]] = []
+
+    for message in messages:
+        metadata = message.get("metadata")
+        normalized_messages.append(
+            {
+                "role": str(message.get("role") or "assistant"),
+                "content": str(message.get("content") or ""),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
+
+    return normalized_messages
+
+
+def _build_pdf_response(
+    conversation_id: Optional[str],
+    title: Optional[str],
+    messages: List[Dict[str, Any]],
+    owner_label: Optional[str],
+) -> Response:
+    normalized_messages = _normalize_pdf_messages(messages)
+
+    if not normalized_messages:
+        raise HTTPException(status_code=400, detail="Conversa sem mensagens para exportar")
+
+    conversation = {
+        "id": conversation_id or "conversa",
+        "title": (title or conversation_id or "Nova conversa").strip(),
+    }
+    html_content = _build_conversation_html(conversation, normalized_messages, owner_label)
+
+    try:
+        pdf_bytes = _render_pdf(html_content)
+    except ValueError as err:
+        logger.error("❌ Erro ao gerar PDF para conversa %s: %s", conversation["id"], err)
+        raise HTTPException(status_code=500, detail="Falha ao gerar PDF da conversa") from err
+
+    filename = f'cora_conversa_{_sanitize_filename(conversation["title"])}.pdf'
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    logger.info("✅ PDF da conversa %s gerado com sucesso", conversation["id"])
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 
 
@@ -720,6 +795,23 @@ async def processar_consulta(
             status="error"
         )
 
+@app.post("/api/conversations/pdf")
+async def export_conversation_pdf_from_payload(
+    payload: ConversationPdfRequest,
+    user: dict = Depends(verify_token)
+):
+    """Exporta PDF a partir do payload recebido do frontend autenticado."""
+    conversation_id = payload.conversation_id or "conversa"
+    logger.info("📄 Solicitada exportação em PDF via payload para conversa %s", conversation_id)
+
+    return await asyncio.to_thread(
+        _build_pdf_response,
+        payload.conversation_id,
+        payload.title,
+        [message.model_dump() for message in payload.messages],
+        user.get("email") or user.get("name"),
+    )
+
 @app.get("/api/conversations/{conversation_id}/pdf")
 async def export_conversation_pdf(
     conversation_id: str,
@@ -736,23 +828,13 @@ async def export_conversation_pdf(
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
 
     messages = await _firestore_get_messages(uid, conversation_id)
-
-    html_content = _build_conversation_html(conversation, messages, user.get("email") or user.get("name"))
-
-    try:
-        pdf_bytes = await asyncio.to_thread(_render_pdf, html_content)
-    except ValueError as err:
-        logger.error("❌ Erro ao gerar PDF para conversa %s: %s", conversation_id, err)
-        raise HTTPException(status_code=500, detail="Falha ao gerar PDF da conversa")
-
-    file_title = conversation.get("title") or conversation_id
-    filename = f"cora_conversa_{_sanitize_filename(file_title)}.pdf"
-
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"'
-    }
-    logger.info("✅ PDF da conversa %s gerado com sucesso", conversation_id)
-    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+    return await asyncio.to_thread(
+        _build_pdf_response,
+        conversation_id,
+        conversation.get("title"),
+        messages,
+        user.get("email") or user.get("name"),
+    )
 
 @app.get("/api/metrics")
 async def get_metrics():

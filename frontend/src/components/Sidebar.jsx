@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Plus, MessageSquare, Sun, Moon, LogOut, User, MoreVertical, Edit, Trash2, X, Check, Download, Menu } from 'lucide-react';
-import { auth } from '../lib/firebase';
 import {
   createConversation,
   deleteConversation,
+  getConversationExportData,
   listConversations,
   renameConversation,
 } from '../lib/firestore';
+import { fetchWithAuth, getApiErrorMessage } from '../lib/api';
 import './Sidebar.css';
 
 function Sidebar({ isOpen, onToggle, onNewChat, user, onSignOut, currentConversationId, onConversationSelect, onConversationDeleted }) {
@@ -222,32 +223,21 @@ function Sidebar({ isOpen, onToggle, onNewChat, user, onSignOut, currentConversa
     setDownloadingId(conversationId);
 
     try {
-      const token = await auth.currentUser?.getIdToken();
-      const response = await fetch(`/api/conversations/${conversationId}/pdf`, {
+      if (!user?.uid) {
+        throw new Error('Sessao do usuario nao encontrada.');
+      }
+
+      const exportPayload = await getConversationExportData(user.uid, conversationId, title);
+      const response = await fetchWithAuth('/api/conversations/pdf', {
+        method: 'POST',
         headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify(exportPayload),
       });
 
       if (!response.ok) {
-        let errorMessage = `Erro ao baixar PDF (${response.status})`;
-        try {
-          const contentType = response.headers.get('content-type');
-          if (contentType?.includes('application/json')) {
-            const data = await response.json();
-            if (data?.detail) {
-              errorMessage = data.detail;
-            }
-          } else {
-            const text = await response.text();
-            if (text) {
-              errorMessage = text;
-            }
-          }
-        } catch (parseError) {
-          console.error('Erro ao interpretar resposta de erro do PDF:', parseError);
-        }
-        throw new Error(errorMessage);
+        throw new Error(await getApiErrorMessage(response));
       }
 
       const blob = await response.blob();

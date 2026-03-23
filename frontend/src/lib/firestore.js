@@ -127,6 +127,15 @@ export async function renameConversation(uid, conversationId, title) {
 }
 
 export async function addMessage(uid, conversationId, role, content, metadata = {}) {
+  const hasExplicitOptions =
+    metadata
+    && typeof metadata === 'object'
+    && (
+      Object.prototype.hasOwnProperty.call(metadata, 'metadata')
+      || Object.prototype.hasOwnProperty.call(metadata, 'status')
+    );
+  const messageMetadata = hasExplicitOptions ? (metadata.metadata || {}) : (metadata || {});
+  const messageStatus = hasExplicitOptions ? (metadata.status || 'saved') : 'saved';
   const messageRef = doc(messagesCollectionRef(uid, conversationId));
   const batch = writeBatch(db);
 
@@ -134,9 +143,9 @@ export async function addMessage(uid, conversationId, role, content, metadata = 
     message_id: messageRef.id,
     role,
     content,
-    metadata,
+    metadata: messageMetadata,
     created_at: serverTimestamp(),
-    status: 'saved',
+    status: messageStatus,
   });
 
   batch.update(conversationDocRef(uid, conversationId), {
@@ -161,11 +170,38 @@ export async function loadConversationMessages(uid, conversationId) {
       id: messageDoc.id,
       role: data.role,
       content: data.content,
+      metadata: data.metadata || {},
       references: data.metadata?.references || [],
       timestamp: serializeTimestamp(data.created_at) || new Date().toISOString(),
       isError: data.status === 'error',
     };
   });
+}
+
+export async function getConversationExportData(uid, conversationId, fallbackTitle = 'Nova conversa') {
+  const conversation = await getConversation(uid, conversationId);
+  if (!conversation) {
+    throw new Error('Conversa não encontrada');
+  }
+
+  const snapshot = await getDocs(
+    query(messagesCollectionRef(uid, conversationId), orderBy('created_at', 'asc'))
+  );
+
+  return {
+    conversation_id: conversationId,
+    title: conversation.title || fallbackTitle,
+    messages: snapshot.docs.map((messageDoc) => {
+      const data = messageDoc.data();
+      return {
+        id: messageDoc.id,
+        role: data.role || 'assistant',
+        content: data.content || '',
+        metadata: data.metadata || {},
+        timestamp: serializeTimestamp(data.created_at),
+      };
+    }),
+  };
 }
 
 export async function updateConversationTitle(uid, conversationId, title) {

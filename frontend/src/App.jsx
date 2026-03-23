@@ -14,6 +14,7 @@ import {
   loadConversationMessages,
   updateConversationTitle,
 } from './lib/firestore';
+import { fetchWithAuth, getApiErrorMessage } from './lib/api';
 import AuthComponent from './components/Auth';
 import Sidebar from './components/Sidebar';
 import Chat from './components/Chat';
@@ -201,12 +202,10 @@ function App() {
     setIsLoading(true);
 
     try {
-      const token = await auth.currentUser?.getIdToken();
-      const response = await fetch('/api/consulta', {
+      const response = await fetchWithAuth('/api/consulta', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           pergunta: question,
@@ -216,7 +215,7 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Erro: ${response.status}`);
+        throw new Error(await getApiErrorMessage(response));
       }
 
       const result = await response.json();
@@ -225,6 +224,7 @@ function App() {
         role: 'assistant',
         content: result.resposta_completa || result.resumo,
         references: result.references || [],
+        isError: result.status === 'error',
         timestamp: new Date().toISOString(),
       };
 
@@ -232,10 +232,13 @@ function App() {
 
       try {
         await addMessage(user.uid, conversationId, 'assistant', assistantMessage.content, {
-          references: result.references || [],
-          fontes: result.fontes || 0,
-          workflow_id: result.workflow_id || null,
-          duracao: result.duracao || null,
+          metadata: {
+            references: result.references || [],
+            fontes: result.fontes || 0,
+            workflow_id: result.workflow_id || null,
+            duracao: result.duracao || null,
+          },
+          status: assistantMessage.isError ? 'error' : 'saved',
         });
       } catch (error) {
         console.error('Erro ao salvar resposta no Firestore:', error);
@@ -247,7 +250,7 @@ function App() {
         {
           id: `error_${Date.now()}`,
           role: 'assistant',
-          content: `❌ Erro ao processar sua pergunta: ${error.message}. Verifique se a API esta rodando.`,
+          content: `❌ Erro ao processar sua pergunta: ${error.message}.`,
           isError: true,
           timestamp: new Date().toISOString(),
         },

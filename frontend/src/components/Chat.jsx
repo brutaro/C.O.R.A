@@ -5,6 +5,23 @@ import './Chat.css';
 function Chat({ messages, isLoading }) {
   const [copiedId, setCopiedId] = useState(null);
 
+  const escapeHtmlPreservingBasicFormatting = (content) => {
+    const text = String(content || '')
+      .replace(/<strong>/gi, '___TAG_STRONG_OPEN___')
+      .replace(/<\/strong>/gi, '___TAG_STRONG_CLOSE___')
+      .replace(/<b>/gi, '___TAG_STRONG_OPEN___')
+      .replace(/<\/b>/gi, '___TAG_STRONG_CLOSE___');
+
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/___TAG_STRONG_OPEN___/g, '<strong>')
+      .replace(/___TAG_STRONG_CLOSE___/g, '</strong>');
+  };
+
   const getReferenceNamespace = (message) => {
     const namespaces = [...new Set((message.references || []).map((ref) => ref.namespace).filter(Boolean))];
     if (namespaces.length === 0) {
@@ -73,8 +90,10 @@ function Chat({ messages, isLoading }) {
   };
 
   const formatMessage = (content) => {
+    const safeContent = escapeHtmlPreservingBasicFormatting(content);
+
     // Converte markdown simples para HTML
-    return content
+    return safeContent
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>')
       .replace(/`(.*?)`/g, '<code>$1</code>')
@@ -147,7 +166,7 @@ function Chat({ messages, isLoading }) {
                 <ul className="references-list">
                   {message.references.map((ref, index) => (
                     <li key={index} className="reference-item">
-                      {ref.url ? (
+                      {/^https?:\/\//i.test(ref.url || '') ? (
                         <a
                           href={ref.url}
                           target="_blank"

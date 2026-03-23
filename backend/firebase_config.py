@@ -68,4 +68,7 @@ def get_firebase_app():
 @lru_cache(maxsize=1)
 def get_firestore_client():
     app = get_firebase_app()
-    return firestore.client(app=app)
+    database_id = os.getenv('FIREBASE_FIRESTORE_DATABASE_ID')
+    if database_id in {'', '(default)'}:
+        database_id = None
+    return firestore.client(app=app, database_id=database_id)
