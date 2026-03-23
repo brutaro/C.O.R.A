@@ -1,7 +1,7 @@
 import { auth } from './firebase';
 
 export async function fetchWithAuth(input, init = {}) {
-  const executeRequest = async (forceRefresh = false) => {
+  const executeRequest = async (forceRefresh = true) => {
     const headers = new Headers(init.headers || {});
     const token = await auth.currentUser?.getIdToken(forceRefresh);
 
@@ -15,7 +15,7 @@ export async function fetchWithAuth(input, init = {}) {
     });
   };
 
-  let response = await executeRequest(false);
+  let response = await executeRequest(true);
 
   if (response.status === 401 && auth.currentUser) {
     response = await executeRequest(true);

@@ -921,6 +921,12 @@ except Exception as e:
 
 if frontend_build_path.exists():
     logger.info(f"✅ Servindo frontend estático de: {frontend_build_path}")
+
+    def _serve_index_html() -> FileResponse:
+        return FileResponse(
+            frontend_build_path / "index.html",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
     
     # Monta arquivos estáticos (JS, CSS, imagens)
     # Verifica se a pasta static existe dentro do build
@@ -942,7 +948,7 @@ if frontend_build_path.exists():
             return FileResponse(file_path)
             
         # Se não for arquivo e não for rota de API, retorna index.html (Client-side routing)
-        return FileResponse(frontend_build_path / "index.html")
+        return _serve_index_html()
 
 else:
     logger.warning("⚠️ Diretório de build do frontend não encontrado. Servindo apenas API.")
