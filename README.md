@@ -57,4 +57,10 @@ Observacao operacional:
 
 - o Firestore foi criado em modo de teste no console;
 - a base de regras definitiva ja foi preparada localmente, mas ainda precisa ser publicada no projeto Firebase.
-- em Cloud Run, o backend pode usar a service account anexada ao servico via credenciais padrao do Google; `FIREBASE_SERVICE_ACCOUNT_JSON` e `FIREBASE_SERVICE_ACCOUNT_PATH` ficam opcionais para esse ambiente.
+
+Deploy via Railway:
+
+- o deploy de producao deve usar o `Dockerfile` da raiz do projeto;
+- o arquivo de variaveis para importacao no Railway fica em `CORA/.env.railway.example`;
+- para o backend validar Firebase no Railway, use `FIREBASE_SERVICE_ACCOUNT_JSON`;
+- para login Google em producao, adicione o dominio publico do Railway aos `Authorized domains` do Firebase Auth.

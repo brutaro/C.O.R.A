@@ -89,7 +89,7 @@ export async function getApiErrorMessage(response) {
       const text = await response.text();
 
       if (response.status === 401 && text.includes('<title>401 Unauthorized</title>')) {
-        return 'Cloud Run bloqueou a requisicao antes do backend. No Cloud Run, deixe o servico com acesso publico e mantenha a autenticacao Firebase no app.';
+        return 'A plataforma bloqueou a requisicao antes do backend. Verifique se o servico esta publico e se o proxy esta encaminhando o header Authorization.';
       }
 
       if (text) {
