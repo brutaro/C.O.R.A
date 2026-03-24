@@ -3,7 +3,6 @@ import {
   getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
-  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import { auth, authReady, googleProvider } from './lib/firebase';
@@ -115,11 +114,6 @@ function App() {
 
     try {
       await authReady;
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(window.navigator.userAgent);
-      if (isMobile) {
-        await signInWithRedirect(auth, googleProvider);
-        return;
-      }
       await signInWithPopup(auth, googleProvider);
     } catch (error) {
       console.error('Erro ao autenticar com Google:', error);
