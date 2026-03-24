@@ -6,7 +6,7 @@ import {
   signInWithRedirect,
   signOut,
 } from 'firebase/auth';
-import { auth, googleProvider } from './lib/firebase';
+import { auth, authReady, googleProvider } from './lib/firebase';
 import {
   addMessage,
   createConversation,
@@ -32,29 +32,49 @@ function App() {
   const [currentConversationId, setCurrentConversationId] = useState(null);
 
   useEffect(() => {
-    getRedirectResult(auth).catch((error) => {
-      console.error('Erro no retorno do login Firebase:', error);
-      setAuthError('Nao foi possivel concluir o login com Google.');
-    });
+    let unsubscribe = () => {};
+    let isMounted = true;
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    const initializeAuth = async () => {
       try {
-        if (firebaseUser) {
-          await ensureUserProfile(firebaseUser);
-          setUser(firebaseUser);
-        } else {
-          setUser(null);
-        }
+        await authReady;
+        await getRedirectResult(auth);
       } catch (error) {
-        console.error('Erro ao preparar sessao Firebase:', error);
-        setAuthError('Nao foi possivel preparar a sessao do usuario.');
-      } finally {
-        setLoading(false);
-        setAuthBusy(false);
+        console.error('Erro no retorno do login Firebase:', error);
+        if (isMounted) {
+          setAuthError(getFirebaseAuthErrorMessage(error));
+        }
       }
-    });
+      unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+        try {
+          if (firebaseUser) {
+            setUser(firebaseUser);
+            try {
+              await ensureUserProfile(firebaseUser);
+            } catch (error) {
+              console.error('Erro ao preparar perfil do usuario no Firestore:', error);
+              if (isMounted) {
+                setAuthError('Login concluido, mas nao foi possivel sincronizar o perfil no Firestore.');
+              }
+            }
+          } else if (isMounted) {
+            setUser(null);
+          }
+        } finally {
+          if (isMounted) {
+            setLoading(false);
+            setAuthBusy(false);
+          }
+        }
+      });
+    };
 
-    return () => unsubscribe();
+    initializeAuth();
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -94,6 +114,7 @@ function App() {
     setAuthError('');
 
     try {
+      await authReady;
       const isMobile = /Android|iPhone|iPad|iPod/i.test(window.navigator.userAgent);
       if (isMobile) {
         await signInWithRedirect(auth, googleProvider);
