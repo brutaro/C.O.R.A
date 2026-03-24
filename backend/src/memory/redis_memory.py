@@ -19,6 +19,32 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[2] / '.env')
 
+
+def _normalize_env_scalar(value: Optional[str], key_name: str) -> Optional[str]:
+    if value is None:
+        return None
+
+    normalized = str(value).strip()
+    prefix = f"{key_name}="
+    if normalized.startswith(prefix):
+        return normalized[len(prefix):].strip()
+
+    return normalized
+
+
+def _parse_env_int(key_name: str, default: int) -> int:
+    raw_value = os.getenv(key_name)
+    if raw_value in {None, ""}:
+        return default
+
+    normalized = _normalize_env_scalar(raw_value, key_name)
+    try:
+        return int(normalized)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Variavel {key_name} invalida: esperado inteiro, recebido {raw_value!r}"
+        ) from exc
+
 class RedisMemoryManager:
     """Gerenciador de memória Redis para contexto de conversação"""
 
@@ -28,9 +54,9 @@ class RedisMemoryManager:
         # Configurações Redis
         self.redis_config = {
             'host': os.getenv('REDIS_HOST'),
-            'port': int(os.getenv('REDIS_PORT', 6379)),
+            'port': _parse_env_int('REDIS_PORT', 6379),
             'password': os.getenv('REDIS_PASSWORD'),
-            'db': int(os.getenv('REDIS_DB', 0)),
+            'db': _parse_env_int('REDIS_DB', 0),
             'decode_responses': True,
             # Configurações de produção seguindo melhores práticas
             'socket_connect_timeout': 10,  # Timeout para conexão
