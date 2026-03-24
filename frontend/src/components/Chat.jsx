@@ -112,7 +112,7 @@ function Chat({ messages, isLoading }) {
       <div className="chat-empty">
         <div className="empty-content">
           <Bot size={48} className="empty-icon" />
-          <h2>C.O.R.A. - Conflito de Interesses</h2>
+          <h2>C.O.R.A. - Conflito de Interesses: Orientacao, Registro e Analise</h2>
           <p>Ola! Eu sou a C.O.R.A., sua assistente para orientacao e analise em conflito de interesses.</p>
           <div className="suggestions">
             <h3>Você pode perguntar sobre:</h3>
