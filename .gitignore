@@ -1,9 +1,12 @@
 .DS_Store
+__pycache__/
+*.pyc
 
 # Firebase
 firebase-debug.log
 .firebase/
 cora-*-firebase-adminsdk-*.json
+.env.docker
 
 # Backend
 backend/.env
@@ -19,6 +22,7 @@ frontend/frontend.log
 
 # Relatorios e backups locais
 reports/
+corpus/
 backend/prompts/*.zip
 backend/prompts/*_v2.txt
 

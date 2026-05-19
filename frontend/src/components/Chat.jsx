@@ -5,6 +5,15 @@ import './Chat.css';
 function Chat({ messages, isLoading }) {
   const [copiedId, setCopiedId] = useState(null);
 
+  const escapeHtml = (content) => {
+    return String(content || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+
   const escapeHtmlPreservingBasicFormatting = (content) => {
     const text = String(content || '')
       .replace(/<strong>/gi, '___TAG_STRONG_OPEN___')
@@ -20,6 +29,46 @@ function Chat({ messages, isLoading }) {
       .replace(/'/g, '&#39;')
       .replace(/___TAG_STRONG_OPEN___/g, '<strong>')
       .replace(/___TAG_STRONG_CLOSE___/g, '</strong>');
+  };
+
+  const formatInlineMarkdown = (content) => {
+    return content
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  };
+
+  const formatInline = (content) => {
+    return formatInlineMarkdown(escapeHtmlPreservingBasicFormatting(content));
+  };
+
+  const isTableSeparator = (line) => (
+    /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
+  );
+
+  const isTableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
+
+  const parseTableCells = (line) => (
+    line
+      .trim()
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim())
+  );
+
+  const renderTable = (rows) => {
+    if (rows.length < 2) {
+      return '';
+    }
+
+    const [header, ...body] = rows;
+    const headerHtml = header.map((cell) => `<th>${formatInline(cell)}</th>`).join('');
+    const bodyHtml = body
+      .map((row) => `<tr>${row.map((cell) => `<td>${formatInline(cell)}</td>`).join('')}</tr>`)
+      .join('');
+
+    return `<div class="markdown-table-wrapper"><table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
   };
 
   const getReferenceNamespace = (message) => {
@@ -90,21 +139,197 @@ function Chat({ messages, isLoading }) {
   };
 
   const formatMessage = (content) => {
-    const safeContent = escapeHtmlPreservingBasicFormatting(content);
+    const lines = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const html = [];
+    let paragraph = [];
+    let listItems = [];
+    let listType = null;
+    let listStart = null;
+    let inCodeBlock = false;
+    let codeLines = [];
 
-    // Converte markdown simples para HTML
-    return safeContent
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/`(.*?)`/g, '<code>$1</code>')
-      .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-      .replace(/^## (.*$)/gim, '<h2>$1</h2>')
-      .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-      .replace(/^- (.*$)/gim, '<li>$1</li>')
-      .replace(/^\d+\. (.*$)/gim, '<li>$1</li>')
-      .replace(/\n\n/g, '</p><p>')
-      .replace(/\n/g, '<br>')
-      .replace(/^(.*)$/gim, '<p>$1</p>');
+    const flushParagraph = () => {
+      if (paragraph.length > 0) {
+        html.push(`<p>${formatInline(paragraph.join(' '))}</p>`);
+        paragraph = [];
+      }
+    };
+
+    const flushList = () => {
+      if (listItems.length === 0) {
+        return;
+      }
+
+      const tag = listType === 'ul' ? 'ul' : 'ol';
+      const typeAttr = listType === 'ol-alpha' ? ' type="a"' : '';
+      const startAttr = listStart && listStart > 1 ? ` start="${listStart}"` : '';
+      html.push(`<${tag}${typeAttr}${startAttr}>${listItems.map((item) => `<li>${formatInline(item)}</li>`).join('')}</${tag}>`);
+      listItems = [];
+      listType = null;
+      listStart = null;
+    };
+
+    const flushCode = () => {
+      html.push(`<pre><code>${escapeHtml(codeLines.join('\n')).trimEnd()}</code></pre>`);
+      codeLines = [];
+    };
+
+    const getListDescriptor = (value) => {
+      const clean = String(value || '').trim();
+      const ordered = clean.match(/^(\d+)\.\s+(.+)$/);
+      if (ordered) {
+        return { type: 'ol', start: Number(ordered[1]), content: ordered[2] };
+      }
+
+      const alpha = clean.match(/^([a-z])\)\s+(.+)$/i);
+      if (alpha) {
+        return {
+          type: 'ol-alpha',
+          start: alpha[1].toLowerCase().charCodeAt(0) - 96,
+          content: alpha[2],
+        };
+      }
+
+      const bullet = clean.match(/^[-*]\s+(.+)$/);
+      if (bullet) {
+        return { type: 'ul', start: null, content: bullet[1] };
+      }
+
+      return null;
+    };
+
+    const nextMeaningfulLine = (startIndex) => {
+      for (let nextIndex = startIndex; nextIndex < lines.length; nextIndex += 1) {
+        const nextLine = lines[nextIndex].trim();
+        if (nextLine) {
+          return nextLine;
+        }
+      }
+      return '';
+    };
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const trimmed = line.trim();
+
+      if (trimmed.startsWith('```')) {
+        flushParagraph();
+        flushList();
+        if (inCodeBlock) {
+          flushCode();
+          inCodeBlock = false;
+        } else {
+          inCodeBlock = true;
+          codeLines = [];
+        }
+        continue;
+      }
+
+      if (inCodeBlock) {
+        codeLines.push(line);
+        continue;
+      }
+
+      if (!trimmed) {
+        flushParagraph();
+        if (listType) {
+          const nextList = getListDescriptor(nextMeaningfulLine(index + 1));
+          if (nextList && nextList.type === listType) {
+            continue;
+          }
+        }
+        flushList();
+        continue;
+      }
+
+      if (isTableRow(trimmed) && isTableSeparator(lines[index + 1] || '')) {
+        flushParagraph();
+        flushList();
+        const rows = [parseTableCells(trimmed)];
+        index += 2;
+        while (index < lines.length && isTableRow(lines[index])) {
+          rows.push(parseTableCells(lines[index]));
+          index += 1;
+        }
+        index -= 1;
+        html.push(renderTable(rows));
+        continue;
+      }
+
+      const headingMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+      if (headingMatch) {
+        flushParagraph();
+        flushList();
+        const level = headingMatch[1].length;
+        html.push(`<h${level}>${formatInline(headingMatch[2])}</h${level}>`);
+        continue;
+      }
+
+      const quoteMatch = trimmed.match(/^>\s*(.*)$/);
+      if (quoteMatch) {
+        flushParagraph();
+        flushList();
+        const quoteLines = [quoteMatch[1]];
+        while (index + 1 < lines.length) {
+          const nextQuote = lines[index + 1].trim().match(/^>\s*(.*)$/);
+          if (!nextQuote) {
+            break;
+          }
+          quoteLines.push(nextQuote[1]);
+          index += 1;
+        }
+        html.push(`<blockquote>${quoteLines.map((quoteLine) => `<p>${formatInline(quoteLine)}</p>`).join('')}</blockquote>`);
+        continue;
+      }
+
+      const listDescriptor = getListDescriptor(trimmed);
+      if (listDescriptor?.type === 'ol') {
+        flushParagraph();
+        if (listType && listType !== 'ol') {
+          flushList();
+        }
+        listType = 'ol';
+        if (listStart === null) {
+          listStart = listDescriptor.start;
+        }
+        listItems.push(listDescriptor.content);
+        continue;
+      }
+
+      if (listDescriptor?.type === 'ol-alpha') {
+        flushParagraph();
+        if (listType && listType !== 'ol-alpha') {
+          flushList();
+        }
+        listType = 'ol-alpha';
+        if (listStart === null) {
+          listStart = listDescriptor.start;
+        }
+        listItems.push(listDescriptor.content);
+        continue;
+      }
+
+      if (listDescriptor?.type === 'ul') {
+        flushParagraph();
+        if (listType && listType !== 'ul') {
+          flushList();
+        }
+        listType = 'ul';
+        listItems.push(listDescriptor.content);
+        continue;
+      }
+
+      flushList();
+      paragraph.push(trimmed);
+    }
+
+    if (inCodeBlock) {
+      flushCode();
+    }
+    flushParagraph();
+    flushList();
+
+    return html.join('');
   };
 
   if (messages.length === 0) {
@@ -190,7 +415,7 @@ function Chat({ messages, isLoading }) {
             {message.references && message.references.length > 0 && (
               <div className="message-stats">
                 <span className="reference-count">
-                  📊 {message.references.length} fontes
+                  Fontes: {message.references.length}
                 </span>
               </div>
             )}

@@ -19,10 +19,25 @@ from dotenv import load_dotenv
 
 # Importa gerenciador de memória Redis
 sys.path.append(str(Path(__file__).parent.parent))
+from formatting.chat_formatter import apply_chat_formatting
 from memory.redis_memory import get_memory_manager
 
 # Carrega variáveis de ambiente do backend isolado do C.O.R.A.
 load_dotenv(Path(__file__).resolve().parents[2] / '.env')
+
+DEFAULT_GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite')
+
+NOTE_REFERENCE_WITH_PREFIX_RE = re.compile(
+    r'\bnota(?:\s+t[eé]cnica)?\s*(?:n[ºo°.]?\s*)?'
+    r'(?P<number>\d{1,4})\s*/\s*(?P<year>(?:19|20)\d{2})'
+    r'(?:\s*/\s*(?P<org>[A-Za-zÇç]{2,}(?:\s*/\s*[A-Za-zÇç]{2,}){0,4}))?',
+    re.IGNORECASE,
+)
+NOTE_REFERENCE_BARE_RE = re.compile(
+    r'\b(?P<number>\d{1,4})\s*/\s*(?P<year>(?:19|20)\d{2})'
+    r'\s*/\s*(?P<org>[A-Za-zÇç]{2,}(?:\s*/\s*[A-Za-zÇç]{2,}){1,4})\b',
+    re.IGNORECASE,
+)
 
 class SimpleResearchAgent:
     """Agente de pesquisa jurídica simplificado e otimizado"""
@@ -36,6 +51,8 @@ class SimpleResearchAgent:
             'host': 'agentes-juridicos-10b89ab.svc.aped-4627-b74a.pinecone.io',
             'namespace': os.getenv('PINECONE_NAMESPACE', 'notas_conflito_interesse'),
             'top_k': int(os.getenv('PINECONE_TOP_K', 10)),
+            'specific_note_lookup_top_k': int(os.getenv('PINECONE_SPECIFIC_NOTE_LOOKUP_TOP_K', 50)),
+            'specific_note_context_top_k': int(os.getenv('PINECONE_SPECIFIC_NOTE_CONTEXT_TOP_K', 12)),
             'similarity_threshold': float(os.getenv('PINECONE_SIMILARITY_THRESHOLD', 0.3)),
             'final_result_count': int(os.getenv('PINECONE_FINAL_RESULT_COUNT', 10)),
             'context_excerpt_chars': int(os.getenv('PINECONE_CONTEXT_EXCERPT_CHARS', 2200)),
@@ -52,7 +69,7 @@ class SimpleResearchAgent:
 
         # Configurações do LLM
         self.llm_config = {
-            'model': 'gemini-2.5-flash',
+            'model': DEFAULT_GEMINI_MODEL,
             'temperature': 0.2,
             'top_p': 0.7,
             'top_k': 40,
@@ -440,6 +457,120 @@ ASSISTENTE: {assistant_response}"""
 
         return " Contexto anterior relevante: " + " ".join(unique_parts)
 
+    def _clean_note_org_path(self, org_path: Optional[str]) -> str:
+        if not org_path:
+            return ""
+        cleaned = re.sub(r'\s*/\s*', '/', org_path.strip())
+        cleaned = re.sub(r'[^A-Za-zÇç/]', '', cleaned)
+        return cleaned.strip('/').upper()
+
+    def _extract_specific_note_reference(self, query: str) -> Optional[Dict[str, str]]:
+        """Extrai referência explícita a uma nota técnica, sem confundir com leis/artigos."""
+        if not query:
+            return None
+
+        match = NOTE_REFERENCE_WITH_PREFIX_RE.search(query) or NOTE_REFERENCE_BARE_RE.search(query)
+        if not match:
+            return None
+
+        raw_number = match.group('number')
+        try:
+            number = str(int(raw_number))
+        except (TypeError, ValueError):
+            number = raw_number
+
+        year = match.group('year')
+        org_path = self._clean_note_org_path(match.groupdict().get('org'))
+        base_identifier = f"{number}/{year}"
+        canonical_identifier = f"{base_identifier}/{org_path}" if org_path else base_identifier
+
+        return {
+            'number': number,
+            'year': year,
+            'org_path': org_path,
+            'base_identifier': base_identifier,
+            'canonical_identifier': canonical_identifier,
+        }
+
+    def _normalize_note_identifier_text(self, value: str) -> str:
+        normalized = self._normalize_whitespace(value).upper()
+        return re.sub(r'\s*/\s*', '/', normalized)
+
+    def _result_matches_note_reference(self, result: Dict[str, Any], note_reference: Dict[str, str]) -> bool:
+        metadata = result.get('metadata') or {}
+        title = (
+            metadata.get('numero_nota_tecnica')
+            or result.get('titulo_full')
+            or result.get('titulo')
+            or ''
+        )
+        normalized_title = self._normalize_note_identifier_text(title)
+        canonical = self._normalize_note_identifier_text(note_reference['canonical_identifier'])
+        base = self._normalize_note_identifier_text(note_reference['base_identifier'])
+
+        if note_reference.get('org_path'):
+            return canonical in normalized_title
+
+        return re.search(rf'(?<!\d){re.escape(base)}(?!\d)', normalized_title) is not None
+
+    def _filter_results_by_note_reference(
+        self,
+        results: List[Dict[str, Any]],
+        note_reference: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        return [
+            result for result in results
+            if self._result_matches_note_reference(result, note_reference)
+        ]
+
+    def _build_specific_note_lookup_query(self, query: str, note_reference: Dict[str, str]) -> str:
+        return self._normalize_whitespace(
+            f"Nota Técnica {note_reference['canonical_identifier']} {query}"
+        )
+
+    def _build_specific_note_target(self, result: Dict[str, Any]) -> Dict[str, str]:
+        metadata = result.get('metadata') or {}
+        return {
+            'arquivo_original': metadata.get('arquivo_original') or result.get('arquivo_original') or '',
+            'numero_nota_tecnica': metadata.get('numero_nota_tecnica') or result.get('titulo_full') or '',
+        }
+
+    def _build_specific_note_metadata_filter(self, target: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        if target.get('numero_nota_tecnica'):
+            return {'numero_nota_tecnica': {'$eq': target['numero_nota_tecnica']}}
+        if target.get('arquivo_original'):
+            return {'arquivo_original': {'$eq': target['arquivo_original']}}
+        return None
+
+    def _result_matches_specific_note_target(
+        self,
+        result: Dict[str, Any],
+        target: Optional[Dict[str, str]],
+    ) -> bool:
+        if not target:
+            return True
+
+        metadata = result.get('metadata') or {}
+        target_file = target.get('arquivo_original')
+        if target_file and (metadata.get('arquivo_original') or result.get('arquivo_original')) == target_file:
+            return True
+
+        target_title = target.get('numero_nota_tecnica')
+        if target_title and (metadata.get('numero_nota_tecnica') or result.get('titulo_full')) == target_title:
+            return True
+
+        return False
+
+    def _filter_results_by_specific_note_target(
+        self,
+        results: List[Dict[str, Any]],
+        target: Optional[Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
+        return [
+            result for result in results
+            if self._result_matches_specific_note_target(result, target)
+        ]
+
     def _merge_search_results(self, query_results: List[Tuple[str, str, List[Dict[str, Any]]]]) -> List[Dict[str, Any]]:
         """Combina resultados da query original e da query reescrita."""
         merged: Dict[str, Dict[str, Any]] = {}
@@ -546,7 +677,13 @@ PERGUNTA ATUAL:
 {query}
 """
 
-    def _search_pinecone(self, query: str) -> List[Dict[str, Any]]:
+    def _search_pinecone(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        final_result_count: Optional[int] = None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Executa busca textual nativa no índice integrado do Pinecone"""
         try:
             headers = {
@@ -556,13 +693,15 @@ PERGUNTA ATUAL:
 
             payload = {
                 'query': {
-                    'top_k': self.pinecone_config['top_k'],
+                    'top_k': top_k or self.pinecone_config['top_k'],
                     'inputs': {
                         'text': query
                     }
                 },
                 'fields': self.pinecone_config['fields'],
             }
+            if metadata_filter:
+                payload['query']['filter'] = metadata_filter
 
             url = (
                 f"https://{self.pinecone_config['host']}/records/namespaces/"
@@ -571,7 +710,16 @@ PERGUNTA ATUAL:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
 
             if response.status_code != 200:
-                raise Exception(f"Erro Pinecone Search: {response.status_code} - {response.text[:300]}")
+                if metadata_filter:
+                    self.logger.warning(
+                        "Filtro Pinecone rejeitado (%s). Repetindo busca sem filtro e aplicando defesa local.",
+                        response.status_code,
+                    )
+                    payload['query'].pop('filter', None)
+                    response = requests.post(url, json=payload, headers=headers, timeout=30)
+
+                if response.status_code != 200:
+                    raise Exception(f"Erro Pinecone Search: {response.status_code} - {response.text[:300]}")
 
             data = response.json()
             hits = data.get('result', {}).get('hits', [])
@@ -581,7 +729,8 @@ PERGUNTA ATUAL:
                 if hit.get('_score', 0) >= self.pinecone_config['similarity_threshold']
             ]
 
-            final_results = filtered_matches[:self.pinecone_config['final_result_count']]
+            result_limit = final_result_count or self.pinecone_config['final_result_count']
+            final_results = filtered_matches[:result_limit]
 
             formatted_results = []
             for hit in final_results:
@@ -624,11 +773,11 @@ Score: {result['score']:.3f}
         return '\n'.join(context_parts)
 
     def _clean_response(self, text: str) -> str:
-        """Remove markdown e normaliza o corpo da resposta gerada pelo LLM."""
+        """Remove apenas envelopes indesejados e preserva o Markdown da LLM."""
         if not text:
             return text
 
-        import strip_markdown
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
 
         # Remove tudo até "Resultado da Pesquisa" e pega só o conteúdo depois
         resultado_idx = text.find('Resultado da Pesquisa')
@@ -636,48 +785,37 @@ Score: {result['score']:.3f}
             text = text[resultado_idx + len('Resultado da Pesquisa'):]
 
         # Remove tudo a partir de "Fontes Consultadas" ou "Principais Fontes"
-        for marker in ['## Fontes Consultadas', '## Principais Fontes', 'Fontes Consultadas', 'Principais Fontes']:
-            idx = text.find(marker)
-            if idx != -1:
-                text = text[:idx]
+        sources_match = re.search(
+            r'(?im)^\s*(?:#{1,3}\s*)?(?:Fontes Consultadas|Principais Fontes)\b.*$',
+            text,
+        )
+        if sources_match:
+            text = text[:sources_match.start()]
 
-        # Usa strip-markdown para remover toda formatação
-        text = strip_markdown.strip_markdown(text)
+        # Remove rótulos estruturais, preservando listas, tabelas, citações e blocos Markdown.
+        text = re.sub(
+            r'(?im)^\s*(?:<b>)?\s*PERGUNTA DO USU[ÁA]RIO:\s*(?:</b>)?.*$',
+            '',
+            text,
+        )
+        text = re.sub(
+            r'(?im)^\s*(?:<b>)?\s*RESPOSTA:\s*(?:</b>)?\s*',
+            '',
+            text,
+        )
 
-        # Converte asteriscos em bullets
-        text = re.sub(r'^\s*\*\s*', '• ', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*[-+]\s*', '• ', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*\d+\.\s*', '• ', text, flags=re.MULTILINE)
-
-        # Remove rótulos estruturais para o backend reformatar de forma determinística
-        text = re.sub(r'<\/?b>', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'^\s*PERGUNTA DO USUÁRIO:\s*.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-        text = re.sub(r'^\s*RESPOSTA:\s*', '', text, flags=re.MULTILINE | re.IGNORECASE)
-
-        # Processa linha por linha para limpeza adicional
+        # Limpa apenas excesso de espaços finais e linhas vazias, sem achatar Markdown.
         lines = text.split('\n')
-        cleaned_lines = []
+        cleaned_lines = [line.rstrip() for line in lines]
 
-        for line in lines:
-            line = line.strip()
-            if line:  # Se a linha não está vazia
-                cleaned_lines.append(line)
-            elif cleaned_lines and cleaned_lines[-1]:  # Se a linha está vazia e a anterior não
-                cleaned_lines.append('')  # Mantém uma linha vazia
+        while cleaned_lines and not cleaned_lines[0].strip():
+            cleaned_lines.pop(0)
+        while cleaned_lines and not cleaned_lines[-1].strip():
+            cleaned_lines.pop()
 
-        # Junta as linhas e adiciona espaçamento duplo entre parágrafos
         text = '\n'.join(cleaned_lines)
-
-        # Substitui quebras simples por duplas para separar parágrafos
-        text = re.sub(r'\n(?!\n)', '\n\n', text)
-
-        # Remove espaços em excesso (mais de 2 quebras de linha)
         text = re.sub(r'\n{3,}', '\n\n', text)
-
-        # Remove espaços extras no início e fim
-        text = text.strip()
-
-        return text
+        return text.strip()
 
     def _context_supports_strong_claims(self, search_results: List[Dict[str, Any]]) -> bool:
         """Verifica se o contexto traz suporte textual para afirmações categóricas."""
@@ -758,8 +896,17 @@ Score: {result['score']:.3f}
                 'source': 'default',
             }
             selected_memory_context = ""
+            specific_note_reference = self._extract_specific_note_reference(query)
+            specific_note_candidates: List[Dict[str, Any]] = []
+            specific_note_target: Optional[Dict[str, str]] = None
+            specific_note_filter: Optional[Dict[str, Any]] = None
 
-            if self.memory_manager and session_id:
+            if specific_note_reference:
+                self.logger.info(
+                    "🎯 Consulta com nota específica detectada: %s",
+                    specific_note_reference['canonical_identifier'],
+                )
+            elif self.memory_manager and session_id:
                 conversation_messages = self.memory_manager.get_conversation_messages(
                     session_id,
                     max_messages=self.memory_config['max_messages']
@@ -782,6 +929,37 @@ Score: {result['score']:.3f}
                         )
                 else:
                     self.logger.info("📭 Sessão sem histórico Redis útil para contextualização")
+
+            if specific_note_reference:
+                lookup_query = self._build_specific_note_lookup_query(query, specific_note_reference)
+                lookup_results = self._search_pinecone(
+                    lookup_query,
+                    top_k=self.pinecone_config['specific_note_lookup_top_k'],
+                    final_result_count=self.pinecone_config['specific_note_lookup_top_k'],
+                )
+                specific_note_candidates = self._filter_results_by_note_reference(
+                    lookup_results,
+                    specific_note_reference,
+                )
+
+                if not specific_note_candidates:
+                    return {
+                        'status': 'no_results',
+                        'message': (
+                            f"Não encontrei a nota {specific_note_reference['canonical_identifier']} "
+                            f"no namespace {self.pinecone_config['namespace']}."
+                        ),
+                        'sources_found': 0,
+                        'processing_time': time.time() - start_time
+                    }
+
+                specific_note_target = self._build_specific_note_target(specific_note_candidates[0])
+                specific_note_filter = self._build_specific_note_metadata_filter(specific_note_target)
+                self.logger.info(
+                    "🎯 Nota específica resolvida: titulo=%s arquivo=%s",
+                    specific_note_target.get('numero_nota_tecnica') or specific_note_reference['canonical_identifier'],
+                    specific_note_target.get('arquivo_original') or 'indisponivel',
+                )
 
             # 2. Busca no Pinecone com query original e, quando aplicável, query reescrita
             retrieval_queries: List[Tuple[str, str]] = [('original', self._normalize_whitespace(query))]
@@ -807,10 +985,27 @@ Score: {result['score']:.3f}
             query_results: List[Tuple[str, str, List[Dict[str, Any]]]] = []
             for query_kind, retrieval_query in retrieval_queries:
                 self.logger.info(f"🔎 Busca Pinecone ({query_kind}): {retrieval_query[:220]}...")
-                results = self._search_pinecone(retrieval_query)
+                results = self._search_pinecone(
+                    retrieval_query,
+                    top_k=(
+                        self.pinecone_config['specific_note_context_top_k']
+                        if specific_note_reference
+                        else None
+                    ),
+                    final_result_count=(
+                        self.pinecone_config['specific_note_context_top_k']
+                        if specific_note_reference
+                        else None
+                    ),
+                    metadata_filter=specific_note_filter,
+                )
+                if specific_note_target:
+                    results = self._filter_results_by_specific_note_target(results, specific_note_target)
                 query_results.append((query_kind, retrieval_query, results))
 
             search_results = self._merge_search_results(query_results)
+            if specific_note_target:
+                search_results = self._filter_results_by_specific_note_target(search_results, specific_note_target)
 
             if (
                 not search_results
@@ -823,6 +1018,10 @@ Score: {result['score']:.3f}
                 search_results = self._merge_search_results(
                     query_results + [('legacy_context', legacy_query, legacy_results)]
                 )
+
+            if specific_note_target and not search_results and specific_note_candidates:
+                self.logger.info("🎯 Usando candidatos da etapa de resolução da nota específica como fallback")
+                search_results = specific_note_candidates[:self.pinecone_config['specific_note_context_top_k']]
 
             if not search_results:
                 return {
@@ -853,7 +1052,8 @@ Score: {result['score']:.3f}
             # 7. Limpa resposta
             response_body = self._clean_response(raw_response)
             moderated_body = self._moderate_response_certainty(response_body, search_results)
-            clean_response = self._format_final_response(query, moderated_body)
+            formatted_body = apply_chat_formatting(moderated_body, logger=self.logger)
+            clean_response = self._format_final_response(query, formatted_body)
 
             # 8. Extrai referências únicas
             references = []

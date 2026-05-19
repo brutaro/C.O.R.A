@@ -80,8 +80,8 @@ class RedisMemoryManager:
             self.logger.error(f"❌ Erro ao inicializar Redis: {e}")
             raise
 
-        # Prefixo para chaves
-        self.key_prefix = "ia-jur:session"
+        # Prefixo proprio do CORA para evitar colisao com outros assistentes.
+        self.key_prefix = os.getenv("REDIS_KEY_PREFIX", "cora:session")
 
     def test_connection(self) -> bool:
         """Testa conexão com Redis"""

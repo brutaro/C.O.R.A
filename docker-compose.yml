@@ -1,0 +1,37 @@
+services:
+  cora:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cora-local:latest
+    container_name: cora_local
+    env_file:
+      - ./backend/.env
+    environment:
+      PORT: "8080"
+      PUBLIC_LOCAL_HOST: "localhost"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.1-flash-lite}"
+      ENABLE_CHAT_FORMATTING: "${ENABLE_CHAT_FORMATTING:-true}"
+      PINECONE_NAMESPACE: "notas_conflito_interesse"
+      REDIS_KEY_PREFIX: "${REDIS_KEY_PREFIX:-cora:session}"
+      FIREBASE_SERVICE_ACCOUNT_PATH: "/run/secrets/cora-firebase-service-account.json"
+    ports:
+      - "${CORA_DOCKER_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${FIREBASE_SERVICE_ACCOUNT_FILE:-./cora-9d120-firebase-adminsdk-fbsvc-9db52ba42d.json}
+        target: /run/secrets/cora-firebase-service-account.json
+        read_only: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=4).status < 500 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped

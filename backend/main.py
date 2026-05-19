@@ -45,8 +45,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ASSISTANT_NAME = "C.O.R.A."
+ASSISTANT_SLUG = "cora"
 ASSISTANT_DESCRIPTION = "Conflito de Interesses: Orientacao, Registro e Analise"
 KNOWLEDGE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "notas_conflito_interesse")
+EXPECTED_KNOWLEDGE_NAMESPACE = "notas_conflito_interesse"
 PUBLIC_LOCAL_HOST = os.getenv("PUBLIC_LOCAL_HOST", "localhost")
 
 research_agent = None
@@ -84,7 +86,11 @@ logger.info(f"✅ CORS configurado com origens: {allowed_origins}")
 async def redirect_loopback_host(request: Request, call_next):
     """Evita falha de login Firebase quando a app é aberta em 127.0.0.1."""
     hostname = request.url.hostname or ""
-    if request.method in {"GET", "HEAD"} and hostname in {"127.0.0.1", "0.0.0.0"}:
+    if (
+        request.method in {"GET", "HEAD"}
+        and hostname in {"127.0.0.1", "0.0.0.0"}
+        and not request.url.path.startswith("/api/")
+    ):
         port = request.url.port
         target_host = PUBLIC_LOCAL_HOST if not port else f"{PUBLIC_LOCAL_HOST}:{port}"
         redirected_url = request.url.replace(netloc=target_host)
@@ -194,6 +200,23 @@ def _sanitize_filename(value: str) -> str:
     return sanitized or "conversa"
 
 
+def _sanitize_memory_component(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_.=-]+", "_", (value or "").strip())
+    return sanitized[:256]
+
+
+def _build_memory_session_id(uid: str, conversation_id: str) -> str:
+    user_component = _sanitize_memory_component(uid)
+    conversation_component = _sanitize_memory_component(conversation_id)
+    if not user_component or not conversation_component:
+        raise HTTPException(status_code=400, detail="Identificador de conversa invalido.")
+    return f"{user_component}:{conversation_component}"
+
+
+def _normalize_request_id(value: Optional[str]) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _format_datetime(value: Optional[str]) -> str:
     if not value:
         return "-"
@@ -276,6 +299,33 @@ async def _firestore_get_messages(uid: str, conversation_id: str) -> List[Dict[s
         ) from exc
 
 
+async def _resolve_memory_session_id(
+    user: Dict[str, Any],
+    conversation_id: Optional[str],
+    session_id: Optional[str] = None,
+) -> str:
+    uid = _normalize_request_id(user.get("uid"))
+    requested_conversation_id = _normalize_request_id(conversation_id) or _normalize_request_id(session_id)
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Usuario autenticado nao identificado.")
+
+    if not requested_conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id e obrigatorio para isolar o historico.")
+
+    conversation = await _firestore_get_conversation(uid, requested_conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversa nao encontrada para o usuario autenticado.")
+
+    if conversation.get("assistant_slug") != ASSISTANT_SLUG:
+        raise HTTPException(status_code=403, detail="Conversa nao pertence ao assistente CORA.")
+
+    if conversation.get("knowledge_namespace") != EXPECTED_KNOWLEDGE_NAMESPACE:
+        raise HTTPException(status_code=403, detail="Conversa fora do namespace autorizado do CORA.")
+
+    return _build_memory_session_id(uid, requested_conversation_id)
+
+
 def _comeca_com_emoji(texto: str) -> bool:
     """Verifica se uma string começa com emoji"""
     if not texto or not texto.strip():
@@ -307,28 +357,212 @@ def _comeca_com_emoji(texto: str) -> bool:
     return False
 
 
-def _texto_para_html(texto: str) -> str:
-    """Converte texto para HTML preservando emojis e tags <b>"""
-    linhas = texto.split('\n')
-    html_paragrafos = []
+def _formatar_markdown_inline(texto: str) -> str:
+    """Converte marcadores inline seguros de Markdown em HTML."""
+    safe = str(texto or "")
+    safe = safe.replace("<strong>", "___TAG_STRONG_OPEN___").replace("</strong>", "___TAG_STRONG_CLOSE___")
+    safe = safe.replace("<b>", "___TAG_STRONG_OPEN___").replace("</b>", "___TAG_STRONG_CLOSE___")
+    safe = html.escape(safe)
+    safe = safe.replace("___TAG_STRONG_OPEN___", "<strong>").replace("___TAG_STRONG_CLOSE___", "</strong>")
+    safe = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", safe)
+    safe = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", safe)
+    safe = re.sub(r"(^|[^*])\*([^*\n]+)\*", r"\1<em>\2</em>", safe)
+    return safe
 
-    for linha in linhas:
-        linha_stripped = linha.strip()
-        if not linha_stripped:
+
+def _eh_separador_tabela_markdown(linha: str) -> bool:
+    return bool(re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", linha or ""))
+
+
+def _eh_linha_tabela_markdown(linha: str) -> bool:
+    return bool(re.match(r"^\s*\|.*\|\s*$", linha or ""))
+
+
+def _parse_celulas_tabela_markdown(linha: str) -> List[str]:
+    return [
+        celula.strip()
+        for celula in linha.strip().strip("|").split("|")
+    ]
+
+
+def _renderizar_tabela_markdown(linhas: List[List[str]]) -> str:
+    if len(linhas) < 2:
+        return ""
+
+    cabecalho, *corpo = linhas
+    ths = "".join(f"<th>{_formatar_markdown_inline(celula)}</th>" for celula in cabecalho)
+    trs = []
+    for linha in corpo:
+        tds = "".join(f"<td>{_formatar_markdown_inline(celula)}</td>" for celula in linha)
+        trs.append(f"<tr>{tds}</tr>")
+
+    return (
+        '<table class="markdown-tabela">'
+        f"<thead><tr>{ths}</tr></thead>"
+        f"<tbody>{''.join(trs)}</tbody>"
+        "</table>"
+    )
+
+
+def _detalhe_lista_markdown(linha: str) -> Optional[Dict[str, Any]]:
+    texto = str(linha or "").strip()
+
+    numerada = re.match(r"^(\d+)\.\s+(.+)$", texto)
+    if numerada:
+        return {"tipo": "ol", "inicio": int(numerada.group(1)), "conteudo": numerada.group(2)}
+
+    letra = re.match(r"^([a-z])\)\s+(.+)$", texto, flags=re.IGNORECASE)
+    if letra:
+        return {
+            "tipo": "ol-alpha",
+            "inicio": ord(letra.group(1).lower()) - 96,
+            "conteudo": letra.group(2),
+        }
+
+    marcador = re.match(r"^[-*]\s+(.+)$", texto)
+    if marcador:
+        return {"tipo": "ul", "inicio": None, "conteudo": marcador.group(1)}
+
+    return None
+
+
+def _texto_para_html(texto: str) -> str:
+    """Renderiza Markdown simples no HTML usado pelo PDF."""
+    linhas = str(texto or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    partes_html: List[str] = []
+    paragrafo: List[str] = []
+    itens_lista: List[str] = []
+    tipo_lista: Optional[str] = None
+    inicio_lista: Optional[int] = None
+    em_codigo = False
+    linhas_codigo: List[str] = []
+
+    def proxima_linha_util(indice: int) -> str:
+        for proximo_indice in range(indice, len(linhas)):
+            candidata = linhas[proximo_indice].strip()
+            if candidata:
+                return candidata
+        return ""
+
+    def flush_paragrafo() -> None:
+        nonlocal paragrafo
+        if not paragrafo:
+            return
+        conteudo = " ".join(paragrafo)
+        classe = ' class="emoji-paragrafo"' if _comeca_com_emoji(conteudo) else ""
+        partes_html.append(f"<p{classe}>{_formatar_markdown_inline(conteudo)}</p>")
+        paragrafo = []
+
+    def flush_lista() -> None:
+        nonlocal itens_lista, tipo_lista, inicio_lista
+        if not itens_lista:
+            return
+
+        tag = "ul" if tipo_lista == "ul" else "ol"
+        tipo_attr = ' type="a"' if tipo_lista == "ol-alpha" else ""
+        inicio_attr = f' start="{inicio_lista}"' if inicio_lista and inicio_lista > 1 else ""
+        itens = "".join(f"<li>{_formatar_markdown_inline(item)}</li>" for item in itens_lista)
+        partes_html.append(f"<{tag}{tipo_attr}{inicio_attr}>{itens}</{tag}>")
+        itens_lista = []
+        tipo_lista = None
+        inicio_lista = None
+
+    def flush_codigo() -> None:
+        nonlocal linhas_codigo
+        partes_html.append(f"<pre><code>{html.escape(chr(10).join(linhas_codigo)).rstrip()}</code></pre>")
+        linhas_codigo = []
+
+    indice = 0
+    while indice < len(linhas):
+        linha = linhas[indice]
+        stripped = linha.strip()
+
+        if stripped.startswith("```"):
+            flush_paragrafo()
+            flush_lista()
+            if em_codigo:
+                flush_codigo()
+                em_codigo = False
+            else:
+                em_codigo = True
+                linhas_codigo = []
+            indice += 1
             continue
 
-        # Adiciona linha em branco antes de item com emoji (exceto se for o primeiro)
-        if _comeca_com_emoji(linha_stripped) and html_paragrafos:
-            html_paragrafos.append('<p style="margin-bottom: 0.3cm; height: 0.3cm;"></p>')
+        if em_codigo:
+            linhas_codigo.append(linha)
+            indice += 1
+            continue
 
-        # Escapar HTML mas preservar tags <b> e emojis
-        para = linha_stripped.replace('&', '&amp;')
-        para = para.replace('<b>', '___TAG_B_OPEN___').replace('</b>', '___TAG_B_CLOSE___')
-        para = para.replace('<', '&lt;').replace('>', '&gt;')
-        para = para.replace('___TAG_B_OPEN___', '<b>').replace('___TAG_B_CLOSE___', '</b>')
-        html_paragrafos.append(f'<p>{para}</p>')
+        if not stripped:
+            flush_paragrafo()
+            if tipo_lista:
+                proxima_lista = _detalhe_lista_markdown(proxima_linha_util(indice + 1))
+                if proxima_lista and proxima_lista["tipo"] == tipo_lista:
+                    indice += 1
+                    continue
+            flush_lista()
+            indice += 1
+            continue
 
-    return '\n'.join(html_paragrafos)
+        if _eh_linha_tabela_markdown(stripped) and indice + 1 < len(linhas) and _eh_separador_tabela_markdown(linhas[indice + 1]):
+            flush_paragrafo()
+            flush_lista()
+            tabela = [_parse_celulas_tabela_markdown(stripped)]
+            indice += 2
+            while indice < len(linhas) and _eh_linha_tabela_markdown(linhas[indice]):
+                tabela.append(_parse_celulas_tabela_markdown(linhas[indice]))
+                indice += 1
+            partes_html.append(_renderizar_tabela_markdown(tabela))
+            continue
+
+        titulo = re.match(r"^(#{1,3})\s+(.+)$", stripped)
+        if titulo:
+            flush_paragrafo()
+            flush_lista()
+            nivel = min(len(titulo.group(1)), 3)
+            partes_html.append(f"<h{nivel}>{_formatar_markdown_inline(titulo.group(2))}</h{nivel}>")
+            indice += 1
+            continue
+
+        citacao = re.match(r"^>\s*(.*)$", stripped)
+        if citacao:
+            flush_paragrafo()
+            flush_lista()
+            citacoes = [citacao.group(1)]
+            indice += 1
+            while indice < len(linhas):
+                proxima_citacao = re.match(r"^>\s*(.*)$", linhas[indice].strip())
+                if not proxima_citacao:
+                    break
+                citacoes.append(proxima_citacao.group(1))
+                indice += 1
+            conteudo = "".join(f"<p>{_formatar_markdown_inline(item)}</p>" for item in citacoes if item.strip())
+            partes_html.append(f"<blockquote>{conteudo}</blockquote>")
+            continue
+
+        detalhe_lista = _detalhe_lista_markdown(stripped)
+        if detalhe_lista:
+            flush_paragrafo()
+            if tipo_lista and tipo_lista != detalhe_lista["tipo"]:
+                flush_lista()
+            tipo_lista = detalhe_lista["tipo"]
+            if inicio_lista is None:
+                inicio_lista = detalhe_lista["inicio"]
+            itens_lista.append(detalhe_lista["conteudo"])
+            indice += 1
+            continue
+
+        flush_lista()
+        paragrafo.append(stripped)
+        indice += 1
+
+    if em_codigo:
+        flush_codigo()
+    flush_paragrafo()
+    flush_lista()
+
+    return "\n".join(partes_html)
 
 
 def _build_conversation_html(
@@ -437,6 +671,88 @@ def _build_conversation_html(
             .resposta-texto {{
                 text-align: justify;
                 margin-bottom: 0.1cm;
+            }}
+            .resposta-texto h1,
+            .resposta-texto h2,
+            .resposta-texto h3 {{
+                text-align: left;
+                line-height: 1.25;
+                margin: 0.45cm 0 0.18cm 0;
+                page-break-after: avoid;
+            }}
+            .resposta-texto h1 {{
+                font-size: 15pt;
+            }}
+            .resposta-texto h2 {{
+                font-size: 13pt;
+                border-bottom: 1px solid #d0d0d0;
+                padding-bottom: 0.08cm;
+            }}
+            .resposta-texto h3 {{
+                font-size: 12pt;
+                color: #0f766e;
+            }}
+            .resposta-texto ul,
+            .resposta-texto ol {{
+                margin: 0.18cm 0 0.25cm 0.55cm;
+                padding-left: 0.35cm;
+                text-align: left;
+            }}
+            .resposta-texto li {{
+                margin: 0.08cm 0;
+                padding-left: 0.08cm;
+            }}
+            .resposta-texto blockquote {{
+                margin: 0.32cm 0;
+                padding: 0.18cm 0.25cm;
+                border-left: 4px solid #d97706;
+                background: #f1f8f7;
+                border-radius: 0.08cm;
+                text-align: left;
+                page-break-inside: avoid;
+            }}
+            .resposta-texto blockquote p {{
+                margin: 0.06cm 0;
+            }}
+            .resposta-texto pre {{
+                background: #f4f4f5;
+                border: 1px solid #d0d0d0;
+                border-radius: 0.08cm;
+                padding: 0.2cm;
+                white-space: pre-wrap;
+                text-align: left;
+            }}
+            .resposta-texto code {{
+                font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+                font-size: 10pt;
+                background: #f4f4f5;
+                padding: 0.02cm 0.06cm;
+                border-radius: 0.05cm;
+            }}
+            .resposta-texto pre code {{
+                background: transparent;
+                padding: 0;
+            }}
+            table.markdown-tabela {{
+                width: 100%;
+                border-collapse: collapse;
+                margin: 0.28cm 0;
+                page-break-inside: avoid;
+                text-align: left;
+                font-size: 10pt;
+            }}
+            table.markdown-tabela th,
+            table.markdown-tabela td {{
+                border: 1px solid #d0d0d0;
+                padding: 0.15cm 0.18cm;
+                vertical-align: top;
+            }}
+            table.markdown-tabela th {{
+                background: #e7f3f1;
+                font-weight: bold;
+            }}
+            table.markdown-tabela tr:nth-child(even) td {{
+                background: #fafafa;
             }}
             table.referencias-tabela {{
                 width: 100%;
@@ -767,7 +1083,11 @@ async def processar_consulta(
         logger.info(f"🔍 Processando: {consulta.pergunta}")
         logger.info(f"📋 DEBUG - session_id: {consulta.session_id}, conversation_id: {consulta.conversation_id}")
 
-        memory_session_id = consulta.conversation_id or consulta.session_id or user.get("uid")
+        memory_session_id = await _resolve_memory_session_id(
+            user,
+            consulta.conversation_id,
+            consulta.session_id,
+        )
         result = await agent.process_query(consulta.pergunta, memory_session_id)
 
         duracao = time.time() - start_time
@@ -816,6 +1136,8 @@ async def processar_consulta(
             status=result.get("status", "error") if isinstance(result, dict) else "error"
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         logger.error(f"❌ Erro no processamento: {e}")
@@ -899,8 +1221,11 @@ async def clear_session(
         raise HTTPException(status_code=500, detail="Memória não disponível")
 
     try:
-        agent.memory_manager.clear_session(session_id)
+        scoped_session_id = await _resolve_memory_session_id(user, session_id)
+        agent.memory_manager.clear_session(scoped_session_id)
         return {"message": f"Sessão {session_id} limpa com sucesso"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Erro ao limpar sessão: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -916,8 +1241,12 @@ async def get_session_stats(
         raise HTTPException(status_code=500, detail="Memória não disponível")
 
     try:
-        stats = agent.memory_manager.get_session_stats(session_id)
+        scoped_session_id = await _resolve_memory_session_id(user, session_id)
+        stats = agent.memory_manager.get_session_stats(scoped_session_id)
+        stats["session_id"] = session_id
         return stats
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Erro ao obter stats da sessão: {e}")
         raise HTTPException(status_code=500, detail=str(e))
