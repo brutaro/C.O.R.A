@@ -1,6 +1,6 @@
 import unittest
 
-from main import _texto_para_html
+from main import _build_conversation_html, _texto_para_html
 
 
 class PdfMarkdownRenderingTest(unittest.TestCase):
@@ -51,6 +51,41 @@ c) terceira condição."""
         self.assertIn('<ol type="a">', rendered)
         self.assertEqual(rendered.count("<li>"), 3)
         self.assertNotIn("a) primeira", rendered)
+
+    def test_pdf_template_matches_chat_list_and_reference_styling(self):
+        rendered = _build_conversation_html(
+            {"id": "teste", "title": "Teste"},
+            [
+                {"role": "user", "content": "Pergunta de teste"},
+                {
+                    "role": "assistant",
+                    "content": "1. Primeiro ponto\n2. Segundo ponto",
+                    "metadata": {
+                        "references": [
+                            {
+                                "source": "Nota Técnica 188/2023",
+                                "score": 0.87,
+                                "url": "https://example.com/nota",
+                                "namespace": "notas_conflito_interesse",
+                            }
+                        ]
+                    },
+                },
+            ],
+            "usuario@example.com",
+        )
+
+        self.assertIn(".resposta-texto li::marker", rendered)
+        self.assertIn("color: #0f766e;", rendered)
+        self.assertIn('<ol><li>Primeiro ponto</li>', rendered)
+        self.assertIn('class="referencias-bloco"', rendered)
+        self.assertIn("Namespace utilizado: notas_conflito_interesse", rendered)
+        self.assertIn('class="referencia-nome"', rendered)
+        self.assertIn('class="referencia-link"', rendered)
+        self.assertIn("font-size: 9pt;", rendered)
+        self.assertIn("font-weight: 500;", rendered)
+        self.assertIn("white-space: nowrap;", rendered)
+        self.assertNotIn("referencias-tabela", rendered)
 
 
 if __name__ == "__main__":

@@ -11,9 +11,8 @@ RUN CI=false npm run build
 FROM python:3.10-slim
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
-    chromium-driver \
     nodejs \
     npm \
     fonts-noto-color-emoji \
@@ -23,7 +22,10 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/reportlab/package*.json ./reportlab/
-RUN cd /app/reportlab && PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm ci --omit=dev
+RUN cd /app/reportlab \
+    && PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm ci --omit=dev \
+    && npm cache clean --force \
+    && rm -rf /root/.cache/puppeteer /root/.npm
 
 COPY backend/src ./src
 COPY backend/prompts ./prompts
@@ -36,6 +38,7 @@ COPY --from=frontend-build /app/frontend/build /app/frontend/build
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
