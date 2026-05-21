@@ -625,8 +625,20 @@ def _build_conversation_html(
                         source = ref.get("source") or ref.get("title") or ref.get("name") or ""
                         score = ref.get("score", 0)
                         url = ref.get("url", "")
+                        ref_metadata = ref.get("metadata") if isinstance(ref.get("metadata"), dict) else {}
+                        namespace = (
+                            ref.get("namespace")
+                            or ref.get("knowledge_namespace")
+                            or ref_metadata.get("namespace")
+                            or ""
+                        )
                         relevancia = f"{score * 100:.1f}%"
-                        referencias_atual.append((source, relevancia, url))
+                        referencias_atual.append({
+                            "source": source,
+                            "relevancia": relevancia,
+                            "url": url,
+                            "namespace": namespace,
+                        })
 
     # Adiciona o último bloco se houver
     if pergunta_atual is not None:
@@ -651,7 +663,10 @@ def _build_conversation_html(
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Emoji", "Apple Color Emoji", "Segoe UI", Arial, sans-serif;
                 font-size: 11pt;
                 line-height: 1.6;
-                color: #000;
+                color: #111827;
+            }}
+            a {{
+                color: #0f766e;
             }}
             .titulo-principal {{
                 font-size: 14pt;
@@ -701,6 +716,13 @@ def _build_conversation_html(
             .resposta-texto li {{
                 margin: 0.08cm 0;
                 padding-left: 0.08cm;
+            }}
+            .resposta-texto li::marker {{
+                color: #0f766e;
+                font-weight: 700;
+            }}
+            .resposta-texto ol[type="a"] {{
+                list-style-type: lower-alpha;
             }}
             .resposta-texto blockquote {{
                 margin: 0.32cm 0;
@@ -754,28 +776,65 @@ def _build_conversation_html(
             table.markdown-tabela tr:nth-child(even) td {{
                 background: #fafafa;
             }}
-            table.referencias-tabela {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 0.2cm;
+            .referencias-bloco {{
+                margin-top: 0.26cm;
+                padding: 0.22cm 0.26cm;
+                background: #f8fafc;
+                border: 1px solid #d0d0d0;
+                border-radius: 0.16cm;
+                text-align: left;
+                page-break-inside: avoid;
             }}
-            table.referencias-tabela td {{
-                padding: 0.1cm 0.2cm;
-                vertical-align: top;
+            .referencias-cabecalho {{
+                font-size: 9.6pt;
+                font-weight: 600;
+                color: #111827;
+                margin-bottom: 0.08cm;
+            }}
+            .referencias-namespace {{
+                margin: 0 0 0.1cm 0;
+                font-size: 8.6pt;
+                color: #64748b;
+            }}
+            .referencias-lista {{
+                list-style: none;
+                margin: 0;
+                padding: 0;
+            }}
+            .referencia-item {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 0.18cm;
+                padding: 0.08cm 0;
+                border-bottom: 1px solid #d0d0d0;
+                font-size: 9pt;
+                line-height: 1.25;
+            }}
+            .referencia-item:last-child {{
+                border-bottom: none;
             }}
             .referencia-nome {{
+                color: #0f766e;
+                font-weight: 500;
                 text-align: left;
+                flex: 1 1 auto;
+                min-width: 0;
+                white-space: nowrap;
             }}
             .referencia-relevancia {{
+                color: #64748b;
+                flex: 0 0 auto;
                 text-align: right;
-                width: 4cm;
-                font-size: 10pt;
+                white-space: nowrap;
+                font-size: 8.6pt;
             }}
             .referencia-link {{
-                color: #2563eb;
+                color: #0f766e;
                 text-decoration: none;
             }}
             .referencia-link:hover {{
+                color: #115e59;
                 text-decoration: underline;
             }}
             p {{
@@ -792,8 +851,8 @@ def _build_conversation_html(
             }}
             .linha-separadora {{
                 width: 100%;
-                border-top: 1px solid #000;
-                margin: 0.6cm 0;
+                border-top: 1px solid #d0d0d0;
+                margin: 0.45cm 0 0.25cm 0;
                 padding: 0;
             }}
             .bloco-conversa {{
@@ -852,19 +911,40 @@ def _build_conversation_html(
 
         # Adicionar referências se houver
         if bloco["referencias"]:
+            namespaces = sorted({
+                str(ref.get("namespace", "")).strip()
+                for ref in bloco["referencias"]
+                if isinstance(ref, dict) and str(ref.get("namespace", "")).strip()
+            })
             html_content += '<hr class="linha-separadora" />'
-            html_content += '<div class="secao-titulo">REFERÊNCIAS CONSULTADAS</div>'
-            html_content += '<table class="referencias-tabela">'
-            for ref, relevancia, url in bloco["referencias"]:
-                ref_escaped = html.escape(ref)
+            html_content += '<div class="referencias-bloco">'
+            html_content += '<div class="referencias-cabecalho">Referências consultadas:</div>'
+            if namespaces:
+                namespaces_html = html.escape(", ".join(namespaces))
+                html_content += f'<p class="referencias-namespace">Namespace utilizado: {namespaces_html}</p>'
+            html_content += '<ul class="referencias-lista">'
+            for ref_info in bloco["referencias"]:
+                if isinstance(ref_info, dict):
+                    ref = str(ref_info.get("source") or "")
+                    relevancia = str(ref_info.get("relevancia") or "")
+                    url = str(ref_info.get("url") or "")
+                else:
+                    ref, relevancia, url = ref_info
+                ref_escaped = html.escape(str(ref))
                 url_normalized = (url or "").strip()
                 if re.match(r"^https?://", url_normalized, flags=re.IGNORECASE):
                     url_escaped = html.escape(url_normalized, quote=True)
                     ref_html = f'<a href="{url_escaped}" class="referencia-link" target="_blank">{ref_escaped}</a>'
                 else:
                     ref_html = ref_escaped
-                html_content += f'<tr><td class="referencia-nome">{ref_html}</td><td class="referencia-relevancia">Relevância: {relevancia}</td></tr>'
-            html_content += '</table>'
+                relevancia_html = html.escape(str(relevancia))
+                html_content += (
+                    '<li class="referencia-item">'
+                    f'<span class="referencia-nome">{ref_html}</span>'
+                    f'<span class="referencia-relevancia">Relevância: {relevancia_html}</span>'
+                    '</li>'
+                )
+            html_content += '</ul></div>'
 
         html_content += '</div>'
 
