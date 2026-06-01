@@ -126,6 +126,70 @@ class RedisMemoryManager:
             self.logger.error(f"❌ Erro inesperado ao armazenar conversa: {e}")
             raise
 
+    def _active_note_key(self, session_id: str) -> str:
+        return f"{self.key_prefix}:active_note:{session_id}"
+
+    def store_active_note_target(self, session_id: str, note_target: Dict[str, Any]) -> None:
+        """Armazena a nota técnica ativa da conversa para follow-ups documentais."""
+        if not note_target:
+            return
+
+        try:
+            key = self._active_note_key(session_id)
+            payload = json.dumps(note_target, ensure_ascii=False)
+            self.redis_client.hset(
+                key,
+                mapping={
+                    'payload': payload,
+                    'updated_at': datetime.now().isoformat(),
+                },
+            )
+            self.redis_client.expire(key, 86400)
+            self.logger.info("🎯 Nota ativa armazenada para sessão: %s", session_id)
+        except (ConnectionError, TimeoutError) as e:
+            self.logger.error(f"❌ Erro de conexão ao armazenar nota ativa: {e}")
+            raise
+        except ResponseError as e:
+            self.logger.error(f"❌ Erro de resposta Redis ao armazenar nota ativa: {e}")
+            raise
+        except Exception as e:
+            self.logger.error(f"❌ Erro inesperado ao armazenar nota ativa: {e}")
+            raise
+
+    def get_active_note_target(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Recupera a nota técnica ativa da conversa, quando existir."""
+        try:
+            payload = self.redis_client.hget(self._active_note_key(session_id), 'payload')
+            if not payload:
+                return None
+
+            note_target = json.loads(payload)
+            return note_target if isinstance(note_target, dict) else None
+        except (ConnectionError, TimeoutError) as e:
+            self.logger.error(f"❌ Erro de conexão ao recuperar nota ativa: {e}")
+            return None
+        except ResponseError as e:
+            self.logger.error(f"❌ Erro de resposta Redis ao recuperar nota ativa: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"❌ Erro inesperado ao recuperar nota ativa: {e}")
+            return None
+
+    def clear_active_note_target(self, session_id: str) -> None:
+        """Remove a nota técnica ativa da conversa."""
+        try:
+            self.redis_client.delete(self._active_note_key(session_id))
+            self.logger.info("🧹 Nota ativa limpa para sessão: %s", session_id)
+        except (ConnectionError, TimeoutError) as e:
+            self.logger.error(f"❌ Erro de conexão ao limpar nota ativa: {e}")
+            raise
+        except ResponseError as e:
+            self.logger.error(f"❌ Erro de resposta Redis ao limpar nota ativa: {e}")
+            raise
+        except Exception as e:
+            self.logger.error(f"❌ Erro inesperado ao limpar nota ativa: {e}")
+            raise
+
     def get_conversation_context(self, session_id: str, max_messages: int = 3) -> str:
         """Recupera contexto da conversação para follow-up"""
         try:
@@ -212,9 +276,11 @@ class RedisMemoryManager:
                 pipe = self.redis_client.pipeline()
                 for key in keys:
                     pipe.delete(key)
+                pipe.delete(self._active_note_key(session_id))
                 pipe.execute()
                 self.logger.info(f"🗑️ Sessão limpa: {session_id} ({len(keys)} mensagens)")
             else:
+                self.clear_active_note_target(session_id)
                 self.logger.info(f"📭 Sessão não encontrada: {session_id}")
 
         except (ConnectionError, TimeoutError) as e:
