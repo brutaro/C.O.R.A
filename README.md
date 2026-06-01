@@ -13,7 +13,10 @@ Estado atual desta etapa:
 - namespace do produto definido como `notas_conflito_interesse`;
 - Redis mantido como memoria contextual;
 - memoria Redis escopada por usuario e conversa, com prefixo `cora:session`;
-- consultas a uma nota tecnica especifica filtram o Pinecone por `numero_nota_tecnica` antes de montar o contexto;
+- consultas a uma nota tecnica especifica filtram o Pinecone por `numero_nota_tecnica`, ordenam chunks e podem expandir ate a nota completa dentro do limite configurado;
+- perguntas seguintes continuam ancoradas na nota tecnica ativa da conversa, salvo mudanca clara de escopo;
+- perguntas amplas mantem `PINECONE_TOP_K=10` por padrao para controlar ruido e custo;
+- contexto do Pinecone nao e truncado por caractere quando `PINECONE_CONTEXT_EXCERPT_CHARS=0`;
 - exportacao em PDF mantida no produto;
 - autenticacao Google e historico migrados para Firebase Auth + Firestore;
 - regras locais do Firestore preparadas em `CORA/firestore.rules`;
@@ -54,7 +57,7 @@ Execucao local recomendada, emulando Railway:
 - app integrada em `http://localhost:8080`
 - health em `http://127.0.0.1:8080/api/health`
 
-Este fluxo usa o `Dockerfile` da raiz da CORA, gera o build do React e serve frontend + API no mesmo processo/container, como no deploy. O arquivo `docker-compose.yml` usa `backend/.env` como fonte das variaveis privadas e força `PINECONE_NAMESPACE=notas_conflito_interesse`, `GEMINI_MODEL=gemini-3.1-flash-lite` e `REDIS_KEY_PREFIX=cora:session`.
+Este fluxo usa o `Dockerfile` da raiz da CORA, gera o build do React e serve frontend + API no mesmo processo/container, como no deploy. O arquivo `docker-compose.yml` usa `backend/.env` como fonte das variaveis privadas e força `PINECONE_NAMESPACE=notas_conflito_interesse`, `GEMINI_MODEL=gemini-3.1-flash-lite`, `PINECONE_TOP_K=10`, `PINECONE_CONTEXT_EXCERPT_CHARS=0`, `PINECONE_SPECIFIC_NOTE_MAX_CHUNKS=0` e `REDIS_KEY_PREFIX=cora:session`. Nesse contexto, `PINECONE_SPECIFIC_NOTE_MAX_CHUNKS=0` significa usar todos os chunks informados por `total_chunks` quando a pergunta for sobre nota especifica.
 
 Configuracao Docker local:
 

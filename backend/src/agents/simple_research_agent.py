@@ -12,6 +12,7 @@ import requests
 import sys
 import re
 import json
+import math
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 import google.generativeai as genai
@@ -51,19 +52,28 @@ class SimpleResearchAgent:
             'host': 'agentes-juridicos-10b89ab.svc.aped-4627-b74a.pinecone.io',
             'namespace': os.getenv('PINECONE_NAMESPACE', 'notas_conflito_interesse'),
             'top_k': int(os.getenv('PINECONE_TOP_K', 10)),
-            'specific_note_lookup_top_k': int(os.getenv('PINECONE_SPECIFIC_NOTE_LOOKUP_TOP_K', 50)),
-            'specific_note_context_top_k': int(os.getenv('PINECONE_SPECIFIC_NOTE_CONTEXT_TOP_K', 12)),
+            'specific_note_lookup_top_k': int(os.getenv('PINECONE_SPECIFIC_NOTE_LOOKUP_TOP_K', 20)),
+            'specific_note_context_top_k': int(os.getenv('PINECONE_SPECIFIC_NOTE_CONTEXT_TOP_K', 15)),
+            'specific_note_max_chunks': int(os.getenv('PINECONE_SPECIFIC_NOTE_MAX_CHUNKS', 0)),
             'similarity_threshold': float(os.getenv('PINECONE_SIMILARITY_THRESHOLD', 0.3)),
             'final_result_count': int(os.getenv('PINECONE_FINAL_RESULT_COUNT', 10)),
-            'context_excerpt_chars': int(os.getenv('PINECONE_CONTEXT_EXCERPT_CHARS', 2200)),
+            'context_excerpt_chars': int(os.getenv('PINECONE_CONTEXT_EXCERPT_CHARS', 0)),
             'fields': [
                 'numero_nota_tecnica',
                 'arquivo_original',
                 'texto_original',
+                'document_id',
+                'document_business_id',
+                'chunk_id',
+                'chunk_number',
+                'total_chunks',
+                'chunk_token_count',
                 'numero_processo',
                 'objeto',
                 'fonte_sei',
                 'referencia_cabecalho',
+                'section_title',
+                'section_path',
             ],
         }
 
@@ -73,7 +83,8 @@ class SimpleResearchAgent:
             'temperature': 0.2,
             'top_p': 0.7,
             'top_k': 40,
-            'max_output_tokens': 8192
+            'max_output_tokens': 8192,
+            'input_token_budget': int(os.getenv('GEMINI_INPUT_TOKEN_BUDGET', 30000)),
         }
 
         self.query_rewriter_config = {
@@ -116,7 +127,11 @@ class SimpleResearchAgent:
             return ""
 
         normalized_content = self._normalize_whitespace(content)
-        return normalized_content[:self.pinecone_config['context_excerpt_chars']]
+        max_chars = self.pinecone_config['context_excerpt_chars']
+        if max_chars <= 0:
+            return normalized_content
+
+        return normalized_content[:max_chars]
 
     def _short_source_title(self, source_title: str) -> str:
         """Reduz o identificador da nota ao bloco principal antes do orgao emissor."""
@@ -182,6 +197,55 @@ class SimpleResearchAgent:
         }
         query_tokens = set(re.findall(r'\b\w+\b', normalized_query))
         return bool(query_tokens & follow_up_tokens)
+
+    def _query_changes_document_scope(self, query: str) -> bool:
+        """Identifica sinais de que o usuario saiu da nota ativa para uma busca ampla."""
+        normalized_query = self._normalize_whitespace(query).lower()
+        if not normalized_query:
+            return False
+
+        scope_shift_patterns = (
+            r'\boutras?\s+notas?\b',
+            r'\bdemais\s+notas?\b',
+            r'\bnotas?\s+semelhantes\b',
+            r'\bnotas?\s+relacionadas\b',
+            r'\bcompare\b',
+            r'\bcomparar\b',
+            r'\bcomparação\b',
+            r'\bcomparativo\b',
+            r'\bem\s+geral\b',
+            r'\bno\s+geral\b',
+            r'\bentendimento\s+geral\b',
+            r'\bentendimento\s+do\s+dnit\b',
+            r'\bo\s+dnit\s+costuma\b',
+            r'\bprecedentes?\b',
+            r'\btodas?\s+as\s+notas?\b',
+            r'\bbase\s+inteira\b',
+            r'\bcorpus\b',
+        )
+        return any(re.search(pattern, normalized_query) for pattern in scope_shift_patterns)
+
+    def _should_anchor_to_active_note(
+        self,
+        query: str,
+        active_note_target: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Mantem follow-ups na nota ativa salvo mudança clara de escopo."""
+        if not active_note_target:
+            return False
+
+        normalized_query = self._normalize_whitespace(query).lower()
+        non_substantive_patterns = (
+            r'^(ok|certo|beleza|perfeito|obrigad[oa]|valeu|entendi)[.!?]*$',
+            r'^(bom dia|boa tarde|boa noite|olá|ola|oi)[.!?]*$',
+        )
+        if any(re.search(pattern, normalized_query) for pattern in non_substantive_patterns):
+            return False
+
+        if self._extract_specific_note_reference(query):
+            return False
+
+        return not self._query_changes_document_scope(query)
 
     def _clip_text(self, text: str, max_chars: int) -> str:
         """Limita trechos longos sem quebrar totalmente a legibilidade."""
@@ -496,6 +560,17 @@ ASSISTENTE: {assistant_response}"""
         normalized = self._normalize_whitespace(value).upper()
         return re.sub(r'\s*/\s*', '/', normalized)
 
+    def _note_identifier_in_text(self, identifier: str, text: str) -> bool:
+        normalized_identifier = self._normalize_note_identifier_text(identifier)
+        normalized_text = self._normalize_note_identifier_text(text)
+        if not normalized_identifier:
+            return False
+
+        return re.search(
+            rf'(?<!\d){re.escape(normalized_identifier)}(?!\d)',
+            normalized_text,
+        ) is not None
+
     def _result_matches_note_reference(self, result: Dict[str, Any], note_reference: Dict[str, str]) -> bool:
         metadata = result.get('metadata') or {}
         title = (
@@ -509,9 +584,9 @@ ASSISTENTE: {assistant_response}"""
         base = self._normalize_note_identifier_text(note_reference['base_identifier'])
 
         if note_reference.get('org_path'):
-            return canonical in normalized_title
+            return self._note_identifier_in_text(canonical, normalized_title)
 
-        return re.search(rf'(?<!\d){re.escape(base)}(?!\d)', normalized_title) is not None
+        return self._note_identifier_in_text(base, normalized_title)
 
     def _filter_results_by_note_reference(
         self,
@@ -528,11 +603,23 @@ ASSISTENTE: {assistant_response}"""
             f"Nota Técnica {note_reference['canonical_identifier']} {query}"
         )
 
+    def _build_active_note_follow_up_query(self, query: str, target: Dict[str, Any]) -> str:
+        note_title = (
+            target.get('numero_nota_tecnica')
+            or target.get('reference_label')
+            or target.get('arquivo_original')
+            or ''
+        )
+        return self._normalize_whitespace(f"Nota Técnica {note_title} {query}")
+
     def _build_specific_note_target(self, result: Dict[str, Any]) -> Dict[str, str]:
         metadata = result.get('metadata') or {}
         return {
             'arquivo_original': metadata.get('arquivo_original') or result.get('arquivo_original') or '',
             'numero_nota_tecnica': metadata.get('numero_nota_tecnica') or result.get('titulo_full') or '',
+            'document_id': metadata.get('document_id') or '',
+            'document_business_id': metadata.get('document_business_id') or '',
+            'reference_label': result.get('reference_label') or result.get('titulo') or '',
         }
 
     def _build_specific_note_metadata_filter(self, target: Dict[str, str]) -> Optional[Dict[str, Any]]:
@@ -551,6 +638,14 @@ ASSISTENTE: {assistant_response}"""
             return True
 
         metadata = result.get('metadata') or {}
+        target_document_id = target.get('document_id')
+        if target_document_id and metadata.get('document_id') == target_document_id:
+            return True
+
+        target_business_id = target.get('document_business_id')
+        if target_business_id and metadata.get('document_business_id') == target_business_id:
+            return True
+
         target_file = target.get('arquivo_original')
         if target_file and (metadata.get('arquivo_original') or result.get('arquivo_original')) == target_file:
             return True
@@ -571,7 +666,167 @@ ASSISTENTE: {assistant_response}"""
             if self._result_matches_specific_note_target(result, target)
         ]
 
-    def _merge_search_results(self, query_results: List[Tuple[str, str, List[Dict[str, Any]]]]) -> List[Dict[str, Any]]:
+    def _dedupe_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for result in results:
+            key = result.get('documento_id') or (
+                f"{result.get('titulo_full', result.get('titulo', ''))}|{result.get('arquivo_original', '')}"
+            )
+            existing = deduped.get(key)
+            if not existing or result.get('score', 0.0) > existing.get('score', 0.0):
+                deduped[key] = result
+
+        return list(deduped.values())
+
+    def _chunk_number_for_result(self, result: Dict[str, Any]) -> Optional[int]:
+        metadata = result.get('metadata') or {}
+        for value in (metadata.get('chunk_number'), result.get('chunk_number')):
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+
+        chunk_id = metadata.get('chunk_id') or result.get('documento_id') or ''
+        match = re.search(r'#chunk:(\d+)', str(chunk_id))
+        if match:
+            return int(match.group(1))
+
+        return None
+
+    def _total_chunks_from_results(self, results: List[Dict[str, Any]]) -> Optional[int]:
+        totals = []
+        for result in results:
+            metadata = result.get('metadata') or {}
+            try:
+                total = int(metadata.get('total_chunks') or 0)
+            except (TypeError, ValueError):
+                continue
+            if total > 0:
+                totals.append(total)
+
+        return max(totals) if totals else None
+
+    def _sort_results_by_chunk_order(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            results,
+            key=lambda result: (
+                self._chunk_number_for_result(result) is None,
+                self._chunk_number_for_result(result) or 0,
+                -(result.get('score') or 0.0),
+            ),
+        )
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimativa conservadora e barata para telemetria e protecao de custo."""
+        return max(1, math.ceil(len(text or '') / 4))
+
+    def _build_retrieval_diagnostics(
+        self,
+        *,
+        retrieval_mode: str,
+        search_results: List[Dict[str, Any]],
+        context_text: str,
+        prompt: str,
+        specific_note_target: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        total_chunks = self._total_chunks_from_results(search_results)
+        sent_chunk_numbers = [
+            chunk_number for chunk_number in (
+                self._chunk_number_for_result(result) for result in search_results
+            )
+            if chunk_number is not None
+        ]
+        prompt_tokens_estimated = self._estimate_tokens(prompt)
+
+        return {
+            'retrieval_mode': retrieval_mode,
+            'results_sent': len(search_results),
+            'context_chars': len(context_text),
+            'prompt_chars': len(prompt),
+            'prompt_tokens_estimated': prompt_tokens_estimated,
+            'input_token_budget': self.llm_config['input_token_budget'],
+            'within_token_budget': prompt_tokens_estimated <= self.llm_config['input_token_budget'],
+            'specific_note_target': specific_note_target,
+            'specific_note_total_chunks': total_chunks,
+            'specific_note_sent_chunks': sent_chunk_numbers,
+            'specific_note_complete': (
+                bool(total_chunks)
+                and len(set(sent_chunk_numbers)) >= total_chunks
+            ) if specific_note_target else None,
+        }
+
+    def _search_specific_note_context(
+        self,
+        query: str,
+        target: Dict[str, str],
+        metadata_filter: Optional[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        configured_top_k = self.pinecone_config['specific_note_context_top_k']
+        configured_max_chunks = self.pinecone_config['specific_note_max_chunks']
+        max_chunks = (
+            None
+            if configured_max_chunks <= 0
+            else max(configured_top_k, configured_max_chunks)
+        )
+        initial_top_k = configured_top_k if max_chunks is None else min(configured_top_k, max_chunks)
+
+        results = self._search_pinecone(
+            query,
+            top_k=initial_top_k,
+            final_result_count=initial_top_k,
+            metadata_filter=metadata_filter,
+            apply_similarity_threshold=False,
+        )
+        results = self._filter_results_by_specific_note_target(results, target)
+        total_chunks = self._total_chunks_from_results(results)
+
+        desired_top_k = initial_top_k
+        if total_chunks and total_chunks > len(self._dedupe_results(results)):
+            desired_top_k = total_chunks if max_chunks is None else min(total_chunks, max_chunks)
+
+        expanded = False
+        if desired_top_k > initial_top_k:
+            expanded_results = self._search_pinecone(
+                query,
+                top_k=desired_top_k,
+                final_result_count=desired_top_k,
+                metadata_filter=metadata_filter,
+                apply_similarity_threshold=False,
+            )
+            expanded_results = self._filter_results_by_specific_note_target(expanded_results, target)
+            if expanded_results:
+                results = expanded_results
+                expanded = True
+
+        results = self._sort_results_by_chunk_order(self._dedupe_results(results))
+        total_chunks = self._total_chunks_from_results(results)
+        sent_chunks = [
+            chunk_number for chunk_number in (
+                self._chunk_number_for_result(result) for result in results
+            )
+            if chunk_number is not None
+        ]
+
+        diagnostics = {
+            'initial_top_k': initial_top_k,
+            'desired_top_k': desired_top_k,
+            'expanded': expanded,
+            'max_chunks': max_chunks,
+            'similarity_threshold_applied': False,
+            'total_chunks': total_chunks,
+            'sent_chunks': sent_chunks,
+            'complete': bool(total_chunks) and len(set(sent_chunks)) >= total_chunks,
+        }
+
+        return results, diagnostics
+
+    def _merge_search_results(
+        self,
+        query_results: List[Tuple[str, str, List[Dict[str, Any]]]],
+        result_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """Combina resultados da query original e da query reescrita."""
         merged: Dict[str, Dict[str, Any]] = {}
 
@@ -606,7 +861,8 @@ ASSISTENTE: {assistant_response}"""
             reverse=True,
         )
 
-        return merged_results[:self.pinecone_config['final_result_count']]
+        limit = result_limit or self.pinecone_config['final_result_count']
+        return merged_results[:limit]
 
     def _init_gemini(self):
         """Inicializa Gemini apenas para geração de resposta"""
@@ -683,6 +939,7 @@ PERGUNTA ATUAL:
         top_k: Optional[int] = None,
         final_result_count: Optional[int] = None,
         metadata_filter: Optional[Dict[str, Any]] = None,
+        apply_similarity_threshold: bool = True,
     ) -> List[Dict[str, Any]]:
         """Executa busca textual nativa no índice integrado do Pinecone"""
         try:
@@ -724,10 +981,13 @@ PERGUNTA ATUAL:
             data = response.json()
             hits = data.get('result', {}).get('hits', [])
 
-            filtered_matches = [
-                hit for hit in hits
-                if hit.get('_score', 0) >= self.pinecone_config['similarity_threshold']
-            ]
+            if apply_similarity_threshold:
+                filtered_matches = [
+                    hit for hit in hits
+                    if hit.get('_score', 0) >= self.pinecone_config['similarity_threshold']
+                ]
+            else:
+                filtered_matches = hits
 
             result_limit = final_result_count or self.pinecone_config['final_result_count']
             final_results = filtered_matches[:result_limit]
@@ -743,6 +1003,8 @@ PERGUNTA ATUAL:
                     'reference_label': labels['reference_label'],
                     'arquivo_original': labels['file_name'],
                     'conteudo': metadata.get('texto_original', ''),
+                    'chunk_number': metadata.get('chunk_number'),
+                    'total_chunks': metadata.get('total_chunks'),
                     'score': hit.get('_score', 0),
                     'metadata': metadata
                 })
@@ -900,6 +1162,9 @@ Score: {result['score']:.3f}
             specific_note_candidates: List[Dict[str, Any]] = []
             specific_note_target: Optional[Dict[str, str]] = None
             specific_note_filter: Optional[Dict[str, Any]] = None
+            retrieval_mode = 'pergunta_ampla'
+            specific_note_retrieval_diagnostics: Dict[str, Any] = {}
+            active_note_target: Optional[Dict[str, Any]] = None
 
             if specific_note_reference:
                 self.logger.info(
@@ -930,7 +1195,30 @@ Score: {result['score']:.3f}
                 else:
                     self.logger.info("📭 Sessão sem histórico Redis útil para contextualização")
 
+                if hasattr(self.memory_manager, 'get_active_note_target'):
+                    active_note_target = self.memory_manager.get_active_note_target(session_id)
+                    if active_note_target:
+                        self.logger.info(
+                            "🎯 Nota ativa recuperada: titulo=%s arquivo=%s",
+                            active_note_target.get('numero_nota_tecnica') or 'indisponivel',
+                            active_note_target.get('arquivo_original') or 'indisponivel',
+                        )
+
+            if (
+                not specific_note_reference
+                and self._should_anchor_to_active_note(query, active_note_target)
+            ):
+                retrieval_mode = 'same_note_follow_up'
+                specific_note_target = active_note_target
+                specific_note_filter = self._build_specific_note_metadata_filter(specific_note_target)
+                self.logger.info(
+                    "🎯 Follow-up ancorado na nota ativa: titulo=%s arquivo=%s",
+                    specific_note_target.get('numero_nota_tecnica') or 'indisponivel',
+                    specific_note_target.get('arquivo_original') or 'indisponivel',
+                )
+
             if specific_note_reference:
+                retrieval_mode = 'nota_especifica'
                 lookup_query = self._build_specific_note_lookup_query(query, specific_note_reference)
                 lookup_results = self._search_pinecone(
                     lookup_query,
@@ -984,28 +1272,37 @@ Score: {result['score']:.3f}
 
             query_results: List[Tuple[str, str, List[Dict[str, Any]]]] = []
             for query_kind, retrieval_query in retrieval_queries:
-                self.logger.info(f"🔎 Busca Pinecone ({query_kind}): {retrieval_query[:220]}...")
-                results = self._search_pinecone(
-                    retrieval_query,
-                    top_k=(
-                        self.pinecone_config['specific_note_context_top_k']
-                        if specific_note_reference
-                        else None
-                    ),
-                    final_result_count=(
-                        self.pinecone_config['specific_note_context_top_k']
-                        if specific_note_reference
-                        else None
-                    ),
-                    metadata_filter=specific_note_filter,
-                )
-                if specific_note_target:
-                    results = self._filter_results_by_specific_note_target(results, specific_note_target)
-                query_results.append((query_kind, retrieval_query, results))
+                effective_retrieval_query = retrieval_query
+                if retrieval_mode == 'same_note_follow_up' and specific_note_target:
+                    effective_retrieval_query = self._build_active_note_follow_up_query(
+                        retrieval_query,
+                        specific_note_target,
+                    )
 
-            search_results = self._merge_search_results(query_results)
+                self.logger.info(f"🔎 Busca Pinecone ({query_kind}): {effective_retrieval_query[:220]}...")
+                if specific_note_target:
+                    results, specific_note_retrieval_diagnostics = self._search_specific_note_context(
+                        effective_retrieval_query,
+                        specific_note_target,
+                        specific_note_filter,
+                    )
+                else:
+                    results = self._search_pinecone(
+                        effective_retrieval_query,
+                        metadata_filter=specific_note_filter,
+                    )
+                query_results.append((query_kind, effective_retrieval_query, results))
+
+            result_limit = (
+                specific_note_retrieval_diagnostics.get('desired_top_k')
+                if specific_note_target
+                else None
+            )
+            search_results = self._merge_search_results(query_results, result_limit=result_limit)
             if specific_note_target:
-                search_results = self._filter_results_by_specific_note_target(search_results, specific_note_target)
+                search_results = self._sort_results_by_chunk_order(
+                    self._filter_results_by_specific_note_target(search_results, specific_note_target)
+                )
 
             if (
                 not search_results
@@ -1044,6 +1341,33 @@ Score: {result['score']:.3f}
                 query=enhanced_query,
                 context_text=context_text
             )
+            retrieval_diagnostics = self._build_retrieval_diagnostics(
+                retrieval_mode=retrieval_mode,
+                search_results=search_results,
+                context_text=context_text,
+                prompt=prompt,
+                specific_note_target=specific_note_target,
+            )
+            if specific_note_retrieval_diagnostics:
+                retrieval_diagnostics['specific_note_retrieval'] = specific_note_retrieval_diagnostics
+
+            self.logger.info(
+                "📏 Recuperação CORA | mode=%s results=%s context_chars=%s prompt_tokens_est=%s budget=%s within_budget=%s",
+                retrieval_diagnostics['retrieval_mode'],
+                retrieval_diagnostics['results_sent'],
+                retrieval_diagnostics['context_chars'],
+                retrieval_diagnostics['prompt_tokens_estimated'],
+                retrieval_diagnostics['input_token_budget'],
+                retrieval_diagnostics['within_token_budget'],
+            )
+            if specific_note_target:
+                self.logger.info(
+                    "🎯 Nota específica | complete=%s chunks=%s/%s expanded=%s",
+                    retrieval_diagnostics.get('specific_note_complete'),
+                    len(set(retrieval_diagnostics.get('specific_note_sent_chunks') or [])),
+                    retrieval_diagnostics.get('specific_note_total_chunks') or 'desconhecido',
+                    specific_note_retrieval_diagnostics.get('expanded'),
+                )
 
             # 6. Gera resposta com LLM
             response = self.llm_model.generate_content(prompt)
@@ -1098,6 +1422,18 @@ Score: {result['score']:.3f}
                         user_message=query,
                         assistant_response=clean_response
                     )
+                    if (
+                        specific_note_target
+                        and retrieval_mode in {'nota_especifica', 'same_note_follow_up'}
+                        and hasattr(self.memory_manager, 'store_active_note_target')
+                    ):
+                        self.memory_manager.store_active_note_target(session_id, specific_note_target)
+                    elif (
+                        retrieval_mode == 'pergunta_ampla'
+                        and active_note_target
+                        and hasattr(self.memory_manager, 'clear_active_note_target')
+                    ):
+                        self.memory_manager.clear_active_note_target(session_id)
                     self.logger.info(f"💾 Conversa armazenada para sessão: {session_id}")
                 except Exception as e:
                     self.logger.error(f"❌ Erro ao armazenar conversa: {e}")
@@ -1110,6 +1446,7 @@ Score: {result['score']:.3f}
                 'processing_time': processing_time,
                 'raw_search_results': search_results,
                 'query_rewrite': query_rewrite,
+                'retrieval_diagnostics': retrieval_diagnostics,
                 'retrieval_queries': [
                     {'kind': query_kind, 'query': retrieval_query}
                     for query_kind, retrieval_query in retrieval_queries
